@@ -1,4 +1,4 @@
-# 「浏览器眼睛与手」Host 半边：发布 browser_* 工具，并挂上 /browser-hands
+# 「浏览器眼睛与手」Host 半边：发布 browser_* 工具，并挂上 /agent-browser-auto
 # 长轮询路由；Client 半边（右侧边栏 tab）由 package.json 的 dsh.client 声明。
 # 可选键说明见 lib/config.js：allowedHosts 为空表示不限制域名，enableEval 默认关闭。
 #
@@ -7,8 +7,8 @@
 # 重启 DSH；真实端口由 Chromium 写进 DevToolsActivePort，插件运行时读文件（5s 缓存）。
 # 端口无认证、只绑 loopback —— 运行期间本机任意进程都能控制该 DSH 实例。
 - insert:
-    - id: browser-hands
-      name: dsh-plugin-browser-hands
+    - id: agent-browser-auto
+      name: dsh-agent-browser-auto
       config:
         allowedHosts: []
         blockedHosts: []

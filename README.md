@@ -1,10 +1,10 @@
-# dsh-plugin-browser-hands · 浏览器眼睛与手
+# dsh-agent-browser-auto · Agent 浏览器（自动）
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-0.2.1--rc.2-6f42c1.svg)](#兼容性)
 [![Tests](https://img.shields.io/badge/tests-51%2F51%20pass-brightgreen.svg)](#验收状态2026-10-23-实测)
 
-给 DSH 桌面版装上「眼睛和手」：模型用 `browser_*` 工具**看见并操作**右侧边栏里一个**用户可见**的浏览器页面。
+给 DSH 桌面版装上「看得见的手」：模型用 `browser_*` 工具**看见并操作**右侧边栏里一个**用户可见**的浏览器页面。
 页面是本插件自己向主进程申请 lease 后创建的 Electron `<webview>`，不碰官方「浏览器」tab 的 DOM（合规、不随上游升级碎裂）。
 
 - 版本：0.1.0 · 目标：DSH 桌面版 0.2.1-rc.2（Electron 44.7.0）
@@ -51,7 +51,7 @@ tools\unblock-folder.cmd
 
 ```bash
 # 推荐：git clone（不产生 MOTW，不会弹安全警告）
-git clone https://github.com/66jiujiu99/dsh-plugin-browser-hands.git
+git clone https://github.com/66jiujiu99/dsh-agent-browser-auto.git
 ```
 
 也可以 GitHub → **Code → Download ZIP** 解压（那就回到第 0 步先解除下载锁）。
@@ -63,7 +63,7 @@ git clone https://github.com/66jiujiu99/dsh-plugin-browser-hands.git
 ```bash
 # 在 DSH 里（需要 danger-full-access 或逐次批准）
 # target 传你 clone / 解压出来的那个目录的绝对路径
-plugin_manager install_bundle target=C:\path\to\dsh-plugin-browser-hands
+plugin_manager install_bundle target=C:\path\to\dsh-agent-browser-auto
 ```
 
 > 以**本地目录**方式安装时，DSH 用的是 `link:`，`package.json` 的 `files` 字段在此模式下不生效
@@ -71,17 +71,17 @@ plugin_manager install_bundle target=C:\path\to\dsh-plugin-browser-hands
 
 - 安装后 Host 半边立即生效；**Client 半边**在桌面窗口里按需加载（首次安装若没看到 tab，按 Ctrl+R 刷新窗口一次）。
 - 改了 `index.js` / `lib/*.js` 之后：**Host 代码不会热更**（loader 不监听文件），需要重新 apply：
-  `plugin_manager set_plugin include:browser-hands enabled=false` → `enabled=true`。
-- 改了 `client.js`：Client HMR 会自动热替换（可在 `~/.dsh/storages/browser-hands/debug.jsonl` 里看到新 clientId）。
+  `plugin_manager set_plugin include:agent-browser-auto enabled=false` → `enabled=true`。
+- 改了 `client.js`：Client HMR 会自动热替换（可在 `~/.dsh/storages/agent-browser-auto/debug.jsonl` 里看到新 clientId）。
 
 ### 卸载
 
 ```bash
-plugin_manager set_plugin include:browser-hands enabled=false   # 先停用
-plugin_manager remove_bundle target=dsh-plugin-browser-hands     # 再移除
+plugin_manager set_plugin include:agent-browser-auto enabled=false   # 先停用
+plugin_manager remove_bundle target=dsh-agent-browser-auto     # 再移除
 ```
 
-审计/调试数据不会自动删除，如需清理：删掉 `~/.dsh/storages/browser-hands/` 即可。
+审计/调试数据不会自动删除，如需清理：删掉 `~/.dsh/storages/agent-browser-auto/` 即可。
 
 ## 工具面（15 个）
 
@@ -127,7 +127,7 @@ stats: 1 elements, 74 chars, ~19 tokens (scope=viewport)
   纯 JS 绑事件、既无 role 也无 tabindex/onclick 的 `<div>` 仍抓不到（启发式的固有边界）。
 - 结果按 UTF-8 字节截断到 `maxResultBytes`（默认 12000），超出会提示用 `browser_snapshot` 收窄。
 
-## 配置（`cordis.patch.yml` 里 `browser-hands` 行的 `config`）
+## 配置（`cordis.patch.yml` 里 `agent-browser-auto` 行的 `config`）
 
 | 键 | 默认 | 含义 |
 |---|---|---|
@@ -137,7 +137,7 @@ stats: 1 elements, 74 chars, ~19 tokens (scope=viewport)
 | `commandTimeoutMs` | `45000` | 单条命令等待上限 |
 | `pollWaitMs` | `20000` | 长轮询挂起上限 |
 | `maxResultBytes` | `12000` | 工具结果上限 |
-| `auditDir` | `""` | 审计目录，空 = `~/.dsh/storages/browser-hands` |
+| `auditDir` | `""` | 审计目录，空 = `~/.dsh/storages/agent-browser-auto` |
 | `debug` | `true` | 是否写 `debug.jsonl` |
 | `deepMode.enabled` | `false` | 是否启用 CDP 深度模式（默认关闭，见下节） |
 | `deepMode.portFile` | `""` | 空 = `%APPDATA%\@deepseek-ai\dsh-desktop\DevToolsActivePort` |
@@ -238,7 +238,7 @@ JavaScript，没有任何编译产物或下载执行步骤。这也是本仓库�
   **权限询问全部拒绝**（摄像头/麦克风/地理位置/通知），**下载全部 `preventDefault`**，**弹窗全部 deny**。
 - 导航只允许 `http:`/`https:`、无内嵌凭据、且不能指向 DSH 自身 origin —— Host 侧在命令下发前就拒绝并说明原因
   （否则主进程会静默吞掉导航，模型只会看到「点了没反应」）。
-- Host 路由 `/browser-hands/*` 走 `ctx.connection.requestRejection`（Host/Origin + 浏览器凭据），拿不到 `connection`
+- Host 路由 `/agent-browser-auto/*` 走 `ctx.connection.requestRejection`（Host/Origin + 浏览器凭据），拿不到 `connection`
   服务时 **fail-closed 503**；渲染进程发来的请求由主进程注入 cookie，外部进程默认拿不到。
 - 不做无头后台操作：状态只在**可见的** tab 里产生；关掉 tab 就释放 guest。
 
@@ -257,7 +257,7 @@ JavaScript，没有任何编译产物或下载执行步骤。这也是本仓库�
 
 ## 审计与排障
 
-`~/.dsh/storages/browser-hands/`
+`~/.dsh/storages/agent-browser-auto/`
 - `audit.jsonl` —— 每次工具调用一行：`ts / sessionId / tool / op / args / urlBefore / urlAfter / ok / error / ms / clientId`
 - `debug.jsonl` —— 路由命中、客户端上下线、命令下发/超时、**Client 侧日志与异常栈**、`deep-mode` 端口可达性
 - `shots/` —— `browser_screenshot` 落盘的 PNG

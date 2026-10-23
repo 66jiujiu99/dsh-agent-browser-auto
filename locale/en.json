@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Browser Hands",
-    "description": "Let the model see and operate a visible browser page in the right sidebar."
+    "title": "Agent Browser (Auto)",
+    "description": "Lets the model see and operate a visible browser page in the right sidebar: it opens the tab, takes snapshots, and reports only what changed to save tokens."
   }
 }

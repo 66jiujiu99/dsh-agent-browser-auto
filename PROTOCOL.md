@@ -1,4 +1,4 @@
-# browser-hands 插件内部协议（Host ⇄ Client）
+# agent-browser-auto 插件内部协议（Host ⇄ Client）
 
 本文件是 Host 半边（`index.js`）与 Client 半边（`client.js`）之间的**唯一契约**。
 两边都按本文件实现，不允许各自发明字段。
@@ -13,10 +13,10 @@
 - 导航只允许 `http:` / `https:`、无内嵌凭据、且不能是 DSH 自身 origin（同端口 + localhost/127.0.0.1/[::1]）。
   违反的导航会被主进程吞掉（不会报错给页面），所以 **Host 侧必须提前拒绝并把原因说清楚**。
 - 渲染进程加载的是 `dsh-app://app`。非静态资源路径由主进程 `forwardWebRequest` 转发到 Host，
-  并注入主进程持有的 cookie（Host/Origin 头被剥掉）。因此 **Client 直接 `fetch('/browser-hands/…')` 就能到达 Host 路由**。
+  并注入主进程持有的 cookie（Host/Origin 头被剥掉）。因此 **Client 直接 `fetch('/agent-browser-auto/…')` 就能到达 Host 路由**。
 - Web（非桌面）客户端没有 `dshDesktop`；此时本插件的 tab 只显示「仅桌面版可用」。
 
-## 1. HTTP 端点（Host 注册在 `ctx.webServer`，前缀 `/browser-hands`）
+## 1. HTTP 端点（Host 注册在 `ctx.webServer`，前缀 `/agent-browser-auto`）
 
 统一 JSON。鉴权：每个请求都调用 `ctx.connection.requestRejection({ headers: req.headers })`，
 返回 401/403 就原样回该状态码并结束请求。`connection` 用 `ctx.get('connection')` 取，取不到时**拒绝**
@@ -24,11 +24,11 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/browser-hands/hello` | 客户端注册/心跳 |
-| GET | `/browser-hands/poll?clientId=…&sessionId=…&wait=20000` | 长轮询取命令 |
-| POST | `/browser-hands/result` | 回传命令结果 |
-| POST | `/browser-hands/log` | 客户端日志（冒烟/排障用） |
-| POST | `/browser-hands/bye` | 客户端注销 |
+| POST | `/agent-browser-auto/hello` | 客户端注册/心跳 |
+| GET | `/agent-browser-auto/poll?clientId=…&sessionId=…&wait=20000` | 长轮询取命令 |
+| POST | `/agent-browser-auto/result` | 回传命令结果 |
+| POST | `/agent-browser-auto/log` | 客户端日志（冒烟/排障用） |
+| POST | `/agent-browser-auto/bye` | 客户端注销 |
 
 响应体一律 `{"ok":true, …}` 或 `{"ok":false,"error":{"code","message"}}`；长轮询无命令时回 **204**（无 body）。
 
@@ -117,9 +117,9 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 - `snapshot` 默认 `true`（除非显式 `false`），即动作后回一张新快照。
 - `changed`：动作是否让页面发生了变化（URL 变化、DOM 变更计数增加、或 input 值变化）。
 - `click` 的坐标路径：`{x,y}` 是 webview **视口内**坐标（左上为原点）。
-- `screenshot` 的 `path` 是 Host 可读的**绝对路径**：Client 通过 `POST /browser-hands/shot` 上传 PNG 二进制，
+- `screenshot` 的 `path` 是 Host 可读的**绝对路径**：Client 通过 `POST /agent-browser-auto/shot` 上传 PNG 二进制，
   Host 落盘到 `<auditDir>/shots/<ts>.png` 并把路径回给工具。**这一条是本协议唯一的多余端点**：
-  `POST /browser-hands/shot?pageId=…&url=…`，body 为 `image/png` 原始字节，响应 `{ok:true, path, bytes}`。
+  `POST /agent-browser-auto/shot?pageId=…&url=…`，body 为 `image/png` 原始字节，响应 `{ok:true, path, bytes}`。
 
 ### 2.3 错误码（Client → Host，写在 result.error.code）
 `NO_PAGE`（没有页面）、`NO_REF`（ref 不存在/已失效）、`NAV_BLOCKED`（URL 不合法或被策略拒绝）、
@@ -161,7 +161,7 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 
 ## 4. 审计与日志（Host 写文件）
 
-目录：`<config.auditDir>`，默认 `$HOME/.dsh/storages/browser-hands`。
+目录：`<config.auditDir>`，默认 `$HOME/.dsh/storages/agent-browser-auto`。
 
 - `audit.jsonl`：每条工具调用一行
   `{"ts":"ISO","sessionId":"…","tool":"browser_open","op":"open","args":{…精简…},"urlBefore":"…","urlAfter":"…","ok":true,"error":null,"ms":812,"clientId":"…"}`
@@ -221,7 +221,7 @@ stats: 1 elements, 220 chars, ~60 tokens (scope=viewport) +1 -0 ~1 textChanged t
 ## 7. 深度模式（CDP）—— Host 直连，不经 Client 命令通道
 
 `browser_deep_snapshot` **完全在 Host 进程内执行**：它不生成 `{id, op, args}` 命令、不走
-`/browser-hands/poll`、不需要 Client 在线。它直连 Chromium 的调试端口读数据，因此与 §1/§2
+`/agent-browser-auto/poll`、不需要 Client 在线。它直连 Chromium 的调试端口读数据，因此与 §1/§2
 的命令通道是**两条独立路径**；Client 侧不需要为它新增任何 op。
 
 ### 7.1 端点解析

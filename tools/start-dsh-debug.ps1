@@ -25,7 +25,7 @@
       1) Fully quit DSH, including the tray icon. No DeepSeek Harness.exe may
          remain in Task Manager, otherwise the new flags are ignored.
       2) Double-click tools\start-dsh-debug.cmd
-      3) Confirm deepMode is enabled for browser-hands in DSH settings; the
+      3) Confirm deepMode is enabled for agent-browser-auto in DSH settings; the
          plugin reads the same DevToolsActivePort file.
 
     Security note: the debugging port has no authentication and is bound to
@@ -172,7 +172,7 @@ Write-Line "[ok] Endpoint    = $endpoint" 'Green'
 if ($version.Browser) { Write-Line "[ok] Browser     = $($version.Browser)" 'Green' }
 Write-Line ''
 Write-Line 'Next steps:' 'Cyan'
-Write-Line '  1) In DSH settings, make sure browser-hands deepMode is enabled.' 'Gray'
+Write-Line '  1) In DSH settings, make sure agent-browser-auto deepMode is enabled.' 'Gray'
 Write-Line '  2) Ask the agent to run browser_deep_snapshot.' 'Gray'
 Write-Line ''
 Write-Line 'Quit DSH and relaunch it normally to close the port.' 'DarkGray'

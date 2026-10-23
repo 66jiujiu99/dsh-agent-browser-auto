@@ -1,5 +1,5 @@
 {
-  "name": "dsh-plugin-browser-hands",
+  "name": "dsh-agent-browser-auto",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,11 +7,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/66jiujiu99/dsh-plugin-browser-hands.git"
+    "url": "git+https://github.com/66jiujiu99/dsh-agent-browser-auto.git"
   },
-  "homepage": "https://github.com/66jiujiu99/dsh-plugin-browser-hands#readme",
+  "homepage": "https://github.com/66jiujiu99/dsh-agent-browser-auto#readme",
   "bugs": {
-    "url": "https://github.com/66jiujiu99/dsh-plugin-browser-hands/issues"
+    "url": "https://github.com/66jiujiu99/dsh-agent-browser-auto/issues"
   },
   "exports": {
     ".": "./index.js",

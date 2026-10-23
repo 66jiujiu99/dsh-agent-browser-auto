@@ -1,9 +1,9 @@
 /**
- * browser-hands — Client 半边。
+ * agent-browser-auto — Client 半边。
  *
  * 职责（详见 PROTOCOL.md）：
  *  1. 注册右侧栏 tab 类型 `agent-browser`，tab 正文里挂一个**自己 acquire 的** <webview> guest；
- *  2. 常驻长轮询 Host 的 /browser-hands/poll，把到来的命令翻译成对 webview 的操作；
+ *  2. 常驻长轮询 Host 的 /agent-browser-auto/poll，把到来的命令翻译成对 webview 的操作；
  *  3. 命令需要时自动把 tab 打开（打开 = 面板展开、用户可见），执行完把结果回给 Host。
  *
  * 与 Host 的唯一契约是 PROTOCOL.md；任何一侧改字段都必须同步改另一边。
@@ -12,18 +12,23 @@
  * React 来自浏览器的模块表，不要 import 任何 @deepseek-ai/* 包。
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-plugin-browser-hands',
+  id: 'dsh-agent-browser-auto',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
 
     /** tab 类型 id（也是 slot 的 key）与 kind。 */
-    const TAB_ID = 'dsh-plugin-browser-hands';
-    const TAB_KIND = 'agent-browser';
-    const ENDPOINT = '/browser-hands';
+    const TAB_ID = 'dsh-agent-browser-auto';
+    /**
+     * tab 类型。改名时**必须**跟着改：旧版本注册的 kind 会一直占着 side-bar 的
+     * 注册表，HMR 重放时会抛 "already registered by a previous generation"，
+     * 于是新注册失败、`openTab` 找不到可用的 tab，所有工具都退化成 NO_CLIENT。
+     */
+    const TAB_KIND = 'agent-browser-auto';
+    const ENDPOINT = '/agent-browser-auto';
     /** lease 的存储分区身份：所有会话共用一份 cookie/存储，但各自持有独立 guest。 */
-    const WORKSPACE_KEY = 'browser-hands';
-    const VERSION = 2;
+    const WORKSPACE_KEY = 'agent-browser-auto';
+    const VERSION = 3;
 
     // ────────────────────────────── 基础设施 ──────────────────────────────
 
@@ -35,7 +40,7 @@ window.__ModuleLoader__.load({
     /** 上报日志（限流：每 120ms 合并一次）。失败静默，绝不因为日志把主流程打挂。 */
     function log(level, message, data) {
       const entry = { level, message: String(message), data: data === undefined ? undefined : safe(data) };
-      if (level === 'error' || level === 'warn') console[level]('[browser-hands]', message, data ?? '');
+      if (level === 'error' || level === 'warn') console[level]('[agent-browser-auto]', message, data ?? '');
       debugQueue.push(entry);
       if (debugTimer) return;
       debugTimer = setTimeout(() => {
@@ -71,7 +76,7 @@ window.__ModuleLoader__.load({
       const text = await response.text();
       let parsed = null;
       try { parsed = text ? JSON.parse(text) : null; } catch { parsed = { raw: text }; }
-      if (!response.ok) throw new Error('browser-hands http ' + response.status + ': ' + (text || '').slice(0, 300));
+      if (!response.ok) throw new Error('agent-browser-auto http ' + response.status + ': ' + (text || '').slice(0, 300));
       return parsed;
     }
 
@@ -1743,7 +1748,7 @@ window.__ModuleLoader__.load({
           log('info', 'client module loaded', { clientId, desktop: isDesktop(), href: String(location.href).slice(0, 120) });
           pollLoop().catch((error) => log('error', 'poll loop crashed', { error }));
           return () => stopPolling();
-        }, 'browser-hands.poll');
+        }, 'agent-browser-auto.poll');
       } catch (error) {
         log('error', 'failed to start polling', { error });
       }
@@ -1759,7 +1764,7 @@ window.__ModuleLoader__.load({
               const enDispose = ctx.locale.register(namespace, 'en', EN);
               return () => { zhDispose(); enDispose(); };
             }
-          }, 'browser-hands.copy');
+          }, 'agent-browser-auto.copy');
           t = ctx.locale.bind(namespace);
           localeReady = true;
         }
@@ -1789,7 +1794,7 @@ window.__ModuleLoader__.load({
           log('error', 'sidebarRightTabs.register failed (maybe already registered by a previous generation)', { error });
           return () => {};
         }
-      }, 'browser-hands.type');
+      }, 'agent-browser-auto.type');
 
       // 2) 注册 tab 正文。
       try {
@@ -1797,7 +1802,7 @@ window.__ModuleLoader__.load({
           name: 'sidebar.right.pane.tab',
           key: TAB_ID,
           ...(localeReady ? { locale: namespace } : {}),
-        }, HandsBody)), 'browser-hands.body');
+        }, HandsBody)), 'agent-browser-auto.body');
       } catch (error) {
         log('error', 'slot registration failed', { error });
       }
@@ -1817,7 +1822,7 @@ window.__ModuleLoader__.load({
           return () => {
             if (typeof dispose === 'function') dispose();
           };
-        }, 'browser-hands.close');
+        }, 'agent-browser-auto.close');
       } catch (error) {
         log('warn', 'close-handler registration failed', { error });
       }
@@ -1826,7 +1831,7 @@ window.__ModuleLoader__.load({
       ctx.effect(() => () => {
         for (const controller of controllers.values()) controller.dispose().catch(() => {});
         controllers.clear();
-      }, 'browser-hands.dispose');
+      }, 'agent-browser-auto.dispose');
     }
 
     return {

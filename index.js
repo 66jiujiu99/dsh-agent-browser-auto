@@ -1,12 +1,12 @@
 /**
- * dsh-plugin-browser-hands —— Host 半边入口。
+ * dsh-agent-browser-auto —— Host 半边入口。
  *
  * 数据流（Host ⇄ Client 的长轮询总线，契约见 PROTOCOL.md）：
  *
  *   模型 ──browser_* 工具──▶ lib/tools.js：参数校验 + URL 预校验（lib/guard.js）
  *        └─ bridge.sendCommand ─▶ 命令入队（按 sessionId 找最近心跳的客户端）
- *   Client（右侧边栏 tab，client.js）──GET /browser-hands/poll──▶ 取到命令并执行
- *        └─ POST /browser-hands/result ─▶ 唤醒等待中的 Promise
+ *   Client（右侧边栏 tab，client.js）──GET /agent-browser-auto/poll──▶ 取到命令并执行
+ *        └─ POST /agent-browser-auto/result ─▶ 唤醒等待中的 Promise
  *   工具 ─▶ lib/render.js 排版（按 maxResultBytes 截断）─▶ 模型看到文本
  *
  *   每次工具调用写 `<auditDir>/audit.jsonl`；路由命中、客户端上下线、命令下发/
@@ -17,7 +17,7 @@
  * `webServer` 与 `connection` 都按可选处理——`webServer` 没挂载时只是不注册路由、
  * 工具回可读错误，插件本身照常加载。
  *
- * @module dsh-plugin-browser-hands
+ * @module dsh-agent-browser-auto
  */
 
 import { resolveConfig } from './lib/config.js'
@@ -29,7 +29,7 @@ import { registerBrowserTools, BROWSER_TOOL_NAMES } from './lib/tools.js'
 import { discover, resolveEndpoint } from './lib/cdp.js'
 
 /** 插件名（与 package.json / cordis.patch.yml 的行 id 对齐）。 */
-export const name = 'dsh-plugin-browser-hands'
+export const name = 'dsh-agent-browser-auto'
 
 /** 工具注册表是硬依赖：没有它这个插件没有意义。 */
 export const inject = ['tools']
@@ -114,7 +114,7 @@ export function apply(ctx, rawConfig) {
   })
 
   // 总线自带掉线扫描定时器，卸载时必须清掉，否则会拖住 Host 进程。
-  ctx.effect(() => () => bridge.dispose(), 'browser-hands: 命令总线')
+  ctx.effect(() => () => bridge.dispose(), 'agent-browser-auto: 命令总线')
 
   // webServer 是可选依赖：没有它就只是不注册路由，工具会回 NO_CHANNEL 可读错误。
   ctx.inject(['webServer'], (webCtx) => {
@@ -130,7 +130,7 @@ export function apply(ctx, rawConfig) {
           message,
           stack: typeof error?.stack === 'string' ? error.stack.slice(0, 4000) : undefined,
         })
-        log('error', `browser-hands: ${ROUTE_PREFIX} 路由注册失败：${message}`)
+        log('error', `agent-browser-auto: ${ROUTE_PREFIX} 路由注册失败：${message}`)
         return () => {}
       }
       bridge.setAvailable(true)
@@ -141,13 +141,13 @@ export function apply(ctx, rawConfig) {
         origin = undefined
       }
       audit.debug('route-mounted', { prefix: ROUTE_PREFIX, origin })
-      log('info', `browser-hands: 路由已挂载 ${ROUTE_PREFIX}（${origin ?? 'origin 未知'}）`)
+      log('info', `agent-browser-auto: 路由已挂载 ${ROUTE_PREFIX}（${origin ?? 'origin 未知'}）`)
       return () => {
         bridge.setAvailable(false)
         disposeRoute()
         audit.debug('route-unmounted', { prefix: ROUTE_PREFIX })
       }
-    }, 'browser-hands: /browser-hands 路由')
+    }, 'agent-browser-auto: /agent-browser-auto 路由')
   })
 
   // 工具注册失败不该拖垮整个插件：路由和 Client 通道要活着（否则面板会陷入
@@ -161,14 +161,14 @@ export function apply(ctx, rawConfig) {
         message,
         stack: typeof error?.stack === 'string' ? error.stack.slice(0, 4000) : undefined,
       })
-      log('error', `browser-hands: browser_* 工具注册失败：${message}`)
+      log('error', `agent-browser-auto: browser_* 工具注册失败：${message}`)
       return () => {}
     }
-  }, 'browser-hands: browser_* 工具')
+  }, 'agent-browser-auto: browser_* 工具')
 
   ctx.effect(() => () => {
     audit.debug('disposed', { stats: bridge.stats() })
-  }, 'browser-hands: 收尾日志')
+  }, 'agent-browser-auto: 收尾日志')
 
   // 深度模式（CDP）：启动时探一次端口，结果只进 debug.jsonl/日志；不阻塞加载。
   // 端口默认关闭（用户用 tools/start-dsh-debug.cmd 以 --remote-debugging-port=0 重启），
@@ -187,7 +187,7 @@ export function apply(ctx, rawConfig) {
           endpoint,
           targets: discovery.targets.length,
         })
-        log('info', `browser-hands: 深度模式端口可达 ${endpoint}（${discovery.targets.length} 个 target）`)
+        log('info', `agent-browser-auto: 深度模式端口可达 ${endpoint}（${discovery.targets.length} 个 target）`)
       } catch (error) {
         audit.debug('deep-mode', {
           enabled: true,
@@ -195,7 +195,7 @@ export function apply(ctx, rawConfig) {
           code: typeof error?.code === 'string' ? error.code : 'INTERNAL',
           error: String(error?.message ?? error),
         })
-        log('warn', `browser-hands: 深度模式端口不可达 —— ${String(error?.message ?? error)}`)
+        log('warn', `agent-browser-auto: 深度模式端口不可达 —— ${String(error?.message ?? error)}`)
       }
     })()
   } else {
@@ -208,7 +208,7 @@ export function apply(ctx, rawConfig) {
 
   log(
     'info',
-    `browser-hands: ${BROWSER_TOOL_NAMES.length} 个工具就绪；审计目录 ${config.auditDir}`
+    `agent-browser-auto: ${BROWSER_TOOL_NAMES.length} 个工具就绪；审计目录 ${config.auditDir}`
     + `；enableEval=${config.enableEval}；deepMode=${config.deepMode.enabled}`,
   )
 }
