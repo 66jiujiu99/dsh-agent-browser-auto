@@ -1,0 +1,33 @@
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+
+# 本地审计与调试输出（插件运行时写在 ~/.dsh/storages，不在仓库里，防手滑）
+audit.jsonl
+debug.jsonl
+shots/
+*.log
+
+# 测试与探针临时产物
+test/tmp/
+_probe*/
+.probe*
+
+# 下载标记（Windows Mark of the Web）
+*:Zone.Identifier
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+
+# 本地凭证与环境（绝不可提交）
+.env
+.env.*
+*.pem
+*.key
+credentials.json

@@ -1,0 +1,26 @@
+# 「浏览器眼睛与手」Host 半边：发布 browser_* 工具，并挂上 /browser-hands
+# 长轮询路由；Client 半边（右侧边栏 tab）由 package.json 的 dsh.client 声明。
+# 可选键说明见 lib/config.js：allowedHosts 为空表示不限制域名，enableEval 默认关闭。
+#
+# deepMode（可选，默认关闭）：通过本机 CDP 端口读取 a11y 树（能看跨源 iframe /
+# closed shadow root）。需要先用 tools/start-dsh-debug.cmd 以 --remote-debugging-port=0
+# 重启 DSH；真实端口由 Chromium 写进 DevToolsActivePort，插件运行时读文件（5s 缓存）。
+# 端口无认证、只绑 loopback —— 运行期间本机任意进程都能控制该 DSH 实例。
+- insert:
+    - id: browser-hands
+      name: dsh-plugin-browser-hands
+      config:
+        allowedHosts: []
+        blockedHosts: []
+        enableEval: false
+        commandTimeoutMs: 45000
+        pollWaitMs: 20000
+        maxResultBytes: 12000
+        auditDir: ""
+        debug: true
+        deepMode:
+          enabled: false
+          portFile: ""      # 空 = 默认 %APPDATA%\@deepseek-ai\dsh-desktop\DevToolsActivePort
+          endpoint: ""      # 空 = 读 portFile 拼 http://127.0.0.1:<port>；非空则直接用（调试/固定端口）
+          maxNodes: 200
+          timeoutMs: 8000

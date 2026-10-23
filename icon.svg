@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Browser Hands">
+  <!-- 原创图标：右侧边栏里的一个浏览器窗口，一只眼睛（看见）+ 一个光标（动手）。 -->
+  <rect x="2" y="4" width="60" height="56" rx="10" fill="#111827"/>
+  <rect x="6" y="8" width="52" height="48" rx="7" fill="#1f2937" stroke="#374151" stroke-width="2"/>
+  <line x1="34" y1="8" x2="34" y2="56" stroke="#4b5563" stroke-width="2"/>
+  <!-- 左侧：眼睛 -->
+  <path d="M11 26c4-6 8.5-9 12-9s8 3 12 9c-4 6-8.5 9-12 9s-8-3-12-9z" fill="none" stroke="#38bdf8" stroke-width="2.5" stroke-linejoin="round"/>
+  <circle cx="23" cy="26" r="3.2" fill="#38bdf8"/>
+  <!-- 右侧：浏览器窗口的三点 + 光标 -->
+  <circle cx="40" cy="14" r="1.8" fill="#9ca3af"/>
+  <circle cx="46" cy="14" r="1.8" fill="#9ca3af"/>
+  <circle cx="52" cy="14" r="1.8" fill="#9ca3af"/>
+  <rect x="39" y="19" width="16" height="26" rx="3" fill="none" stroke="#6b7280" stroke-width="2"/>
+  <path d="M44 27l11 9-5.2 1.1 2.6 5.6-3.2 1.4-2.5-5.7-3.7 3.6z" fill="#fbbf24" stroke="#111827" stroke-width="1" stroke-linejoin="round"/>
+  <!-- 底部：一根手指/手 -->
+  <path d="M13 45h6c3 0 5 2 5 4.5S22 54 19 54h-6z" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linejoin="round"/>
+</svg>

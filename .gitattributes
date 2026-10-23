@@ -1,0 +1,13 @@
+# 统一换行符，避免 Windows 批处理/PowerShell 在别人机器上解析出错
+* text=auto eol=lf
+
+# cmd.exe 与 Windows PowerShell 对 CRLF 更可靠（尤其是多行块与标签）
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制资源不做换行转换
+*.png binary
+*.jpg binary
+*.webp binary
+*.ico binary
