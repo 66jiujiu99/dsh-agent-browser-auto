@@ -1,9 +1,9 @@
 {
   "name": "dsh-agent-browser-auto",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
-  "description": "DeepSeek Harness 桌面版的「浏览器眼睛与手」：用 browser_* 工具看见并操作右侧边栏里一个用户可见的浏览器页面（19 个工具，含选择、上传、对话框预置、条件等待与 CDP 深度模式）。",
+  "description": "DeepSeek Harness 桌面版 Agent 浏览器：默认轻量内嵌，可显式切换独立 profile 的真实 Chrome/Edge；统一 browser_* 工具（20 个）支持快照、输入、上传、对话框、等待与 CDP 深度模式。",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -55,5 +55,8 @@
         "@deepseek-ai/dsh-client-ui-sidebar-right"
       ]
     }
+  },
+  "dependencies": {
+    "playwright-core": "1.64.1"
   }
 }

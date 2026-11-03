@@ -27,6 +27,8 @@ import { createNavigator } from './lib/guard.js'
 import { registerRoutes, ROUTE_PREFIX } from './lib/routes.js'
 import { registerBrowserTools, BROWSER_TOOL_NAMES } from './lib/tools.js'
 import { discover, resolveEndpoint } from './lib/cdp.js'
+import { createRealDriver } from './lib/real-driver.js'
+import { createBackendRouter } from './lib/backend.js'
 
 /** 插件名（与 package.json / cordis.patch.yml 的行 id 对齐）。 */
 export const name = 'dsh-agent-browser-auto'
@@ -102,6 +104,8 @@ export function apply(ctx, rawConfig) {
 
   const audit = createAudit({ config, log })
   const bridge = createBridge({ config, audit })
+  const realDriver = createRealDriver({ config, log })
+  const backend = createBackendRouter({ bridge, realDriver })
   const navigator = createNavigator({
     config,
     getOrigin: () => {
@@ -113,15 +117,17 @@ export function apply(ctx, rawConfig) {
     },
   })
 
-  // 总线自带掉线扫描定时器，卸载时必须清掉，否则会拖住 Host 进程。
+  // 总线自带掉线扫描定时器，卸载时必须清掉；真实浏览器上下文也要逐项释放。
   ctx.effect(() => () => bridge.dispose(), 'agent-browser-auto: 命令总线')
+  ctx.effect(() => () => realDriver.dispose(), 'agent-browser-auto: Playwright 后端')
+  ctx.effect(() => () => backend.dispose(), 'agent-browser-auto: 后端路由')
 
   // webServer 是可选依赖：没有它就只是不注册路由，工具会回 NO_CHANNEL 可读错误。
   ctx.inject(['webServer'], (webCtx) => {
     webCtx.effect(() => {
       let disposeRoute
       try {
-        disposeRoute = registerRoutes(webCtx, { bridge, audit })
+        disposeRoute = registerRoutes(webCtx, { bridge, audit, backend })
       } catch (error) {
         // 路由注册失败同样不拖垮插件：留下栈，工具侧会如实回 NO_CHANNEL。
         const message = String(error?.message ?? error)
@@ -154,7 +160,7 @@ export function apply(ctx, rawConfig) {
   // poll 404 循环，现场什么也看不到）。把栈写进 debug.jsonl 再继续。
   ctx.effect(() => {
     try {
-      return registerBrowserTools(ctx, { config, bridge, navigator, audit })
+      return registerBrowserTools(ctx, { config, bridge: backend, backend, navigator, audit })
     } catch (error) {
       const message = String(error?.message ?? error)
       audit.debug('tools-failed', {

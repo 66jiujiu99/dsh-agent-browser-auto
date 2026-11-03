@@ -24,3 +24,8 @@
           endpoint: ""      # 空 = 读 portFile 拼 http://127.0.0.1:<port>；非空则直接用（调试/固定端口）
           maxNodes: 200
           timeoutMs: 8000
+        # 默认仍是轻量内嵌；只有显式调用 browser_backend 才启动可见 Chrome/Edge。
+        realBrowser:
+          browser: auto       # auto / chrome / edge；不会下载 Chromium
+          profileDir: ""      # 空 = ~/.dsh/storages/agent-browser-auto/real-browser-profiles
+          startupTimeoutMs: 30000

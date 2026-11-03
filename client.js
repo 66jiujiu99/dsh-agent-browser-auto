@@ -1183,6 +1183,14 @@ window.__ModuleLoader__.load({
           this.consoleEntries.push({ level, text: String(event.message || '').slice(0, 500), line: event.line, url: event.sourceId ? String(event.sourceId).slice(0, 200) : undefined });
           if (this.consoleEntries.length > 300) this.consoleEntries.shift();
         });
+        // 只处理 embedder 实际收到的 F12；不向 guest 注入快捷键脚本。
+        // Electron 是否把 guest 焦点的键盘事件转发到 webview 元素取决于运行环境。
+        element.addEventListener('keydown', (event) => {
+          if (event.key !== 'F12') return;
+          event.preventDefault();
+          event.stopPropagation();
+          if (this.owner) this.owner.openDevTools(this.id);
+        });
         element.addEventListener('render-process-gone', () => {
           this.loading = false;
           this.failure = { code: 'render-process-gone', description: '页面渲染进程退出' };
@@ -1272,6 +1280,24 @@ window.__ModuleLoader__.load({
         this.element.sendInputEvent(event);
       }
 
+      openDevTools() {
+        if (!this.element || this.disposed) throw err('NO_PAGE', '没有可检查的轻量页面');
+        if (typeof this.element.openDevTools !== 'function') {
+          throw err('NOT_SUPPORTED', '当前 Electron 版本不支持打开 webview 开发者工具');
+        }
+        let opened = null;
+        try {
+          this.element.openDevTools();
+          opened = typeof this.element.isDevToolsOpened === 'function' ? this.element.isDevToolsOpened() : null;
+          log('info', 'embedded devtools state', { pageId: this.id, opened });
+        } catch (error) {
+          throw err('DEVTOOLS_FAILED', '打开开发者工具失败：' + String(error && error.message ? error.message : error));
+        }
+        if (opened === false) {
+          throw err('DEVTOOLS_UNAVAILABLE', '当前宿主未打开轻量页面开发者工具；请启动真实 Chrome/Edge 后使用原生 F12');
+        }
+      }
+
       /** tab 上显示的名字：优先真实标题，其次 URL，最后「空白页」。 */
       get label() {
         const title = String(this.title || '').trim();
@@ -1320,6 +1346,7 @@ window.__ModuleLoader__.load({
         this.host = null;
         this.busy = 0;
         this.lastError = null;
+        this.backend = null;
         this.listeners = new Set();
         this.version = 0;
       }
@@ -1340,6 +1367,10 @@ window.__ModuleLoader__.load({
           activeId: this.activeId,
           busy: this.busy > 0,
           lastError: this.lastError,
+          backend: this.backend ? {
+            ...this.backend,
+            real: this.backend.real ? { ...this.backend.real } : null,
+          } : null,
           attached: !!this.host,
         };
       }
@@ -1356,8 +1387,46 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /** 只在 hello 成功后调用；无效或缺失状态不改变已有显示。 */
+      setBackend(status) {
+        if (!status || (status.backend !== 'embedded' && status.backend !== 'real')) return;
+        const real = status.real && typeof status.real === 'object' ? {
+          connected: typeof status.real.connected === 'boolean' ? status.real.connected : null,
+          browser: typeof status.real.browser === 'string' ? status.real.browser : '',
+          profileMode: typeof status.real.profileMode === 'string' ? status.real.profileMode : '',
+        } : null;
+        const next = {
+          ok: status.ok !== false,
+          backend: status.backend,
+          real,
+          message: typeof status.message === 'string' ? status.message : '',
+        };
+        if (JSON.stringify(next) === JSON.stringify(this.backend)) return;
+        this.backend = next;
+        this.notify();
+      }
+
       get active() {
         return this.pages.find((page) => page.id === this.activeId && !page.disposed) || null;
+      }
+
+      openDevTools(pageId) {
+        try {
+          const page = pageId
+            ? this.pages.find((item) => item.id === pageId && !item.disposed)
+            : this.active;
+          if (!page) throw err('NO_PAGE', '没有可检查的轻量页面');
+          page.openDevTools();
+          log('info', 'open devtools requested', { pageId: page.id });
+          this.lastError = null;
+          this.notify();
+          return true;
+        } catch (error) {
+          this.lastError = { code: error.bhCode || 'INTERNAL', message: String(error.message || error) };
+          this.notify();
+          log('warn', 'open devtools failed', { error });
+          return false;
+        }
       }
 
       attach(host) {
@@ -2051,14 +2120,19 @@ window.__ModuleLoader__.load({
     }
 
     async function hello() {
+      const sessionId = currentSessionId();
       const response = await postJson('/hello', {
         clientId,
-        sessionId: currentSessionId(),
+        sessionId,
         desktop: isDesktop(),
         version: VERSION,
       });
       pollState.lastHello = Date.now();
       if (response && response.ok === false) throw new Error(response.error && response.error.message);
+      // 后端模式属于本次 hello 的会话；失败或字段无效时保留旧状态，不自动切换。
+      if (sessionId && response && response.backend) {
+        controllerFor(sessionId, true).setBackend(response.backend);
+      }
       return response;
     }
 
@@ -2153,8 +2227,12 @@ window.__ModuleLoader__.load({
       .bh-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dsw-alias-label-quaternary); flex: none; }
       .bh-dot.busy { background: var(--dsw-alias-state-business-primary); }
       .bh-dot.error { background: var(--dsw-alias-state-error-primary); }
+      .bh-backend { flex: none; padding: 1px 5px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 999px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-secondary); font: var(--dsw-font-xxs-11); white-space: nowrap; }
+      .bh-backend.real { border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, transparent); background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent); color: var(--dsw-alias-state-business-primary); }
+      .bh-backend-note { flex: none; padding: 4px 8px; border-bottom: .5px solid var(--dsw-alias-border-l3); background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 7%, transparent); color: var(--dsw-alias-label-secondary); font: var(--dsw-font-xxs-11); line-height: 1.4; }
       .bh-page-loading { flex: none; color: var(--dsw-alias-state-business-primary); font: var(--dsw-font-xxs-11); white-space: nowrap; }
       .bh-icon-button { flex: 0 0 24px; width: 24px; padding: 2px 0; border: .5px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-secondary); font: var(--dsw-font-xs-13); cursor: pointer; }
+      .bh-devtools-button { flex: none; width: auto; padding: 2px 6px; font: var(--dsw-font-xxs-11); white-space: nowrap; }
       .bh-icon-button:disabled, .bh-tab-close:disabled { opacity: .45; cursor: default; }
       .bh-address { flex: 1; min-width: 60px; width: 100%; border: .5px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); border-radius: var(--dsw-radius-sm); font: var(--dsw-font-xxs-12); padding: 3px 7px; outline: none; }
       .bh-address:focus { border-color: var(--dsw-alias-state-business-primary); }
@@ -2217,6 +2295,20 @@ window.__ModuleLoader__.load({
       const [tabBusy, setTabBusy] = React.useState(false);
       const activePage = state.pages.find((page) => page.active) || null;
       const activeUrl = activePage ? activePage.url : '';
+      const backend = state.backend;
+      const backendLabel = backend && backend.backend === 'real'
+        ? '真实 Chrome/Edge'
+        : backend && backend.backend === 'embedded' ? '轻量内嵌' : '';
+      const backendTitle = !backend ? '' : backend.backend === 'real'
+        ? [
+          '工具在独立浏览器窗口操作；本面板保留轻量页面，不与独立窗口同步。',
+          backend.real && backend.real.browser ? '浏览器：' + backend.real.browser : '',
+          backend.real && backend.real.profileMode ? '配置模式：' + backend.real.profileMode : '',
+          backend.real && typeof backend.real.connected === 'boolean'
+            ? '连接状态：' + (backend.real.connected ? '已连接' : '未连接') : '',
+          backend.message,
+        ].filter(Boolean).join('\n')
+        : backend.message || 'Agent 工具使用本面板中的轻量内嵌页面。';
 
       React.useEffect(() => controller.subscribe(() => setState(controller.snapshot())), [controller]);
 
@@ -2240,6 +2332,10 @@ window.__ModuleLoader__.load({
         controller.lastError = { code: error.bhCode || 'INTERNAL', message: String(error.message || error) };
         controller.notify();
         log('warn', 'browser UI action failed', { error });
+      };
+
+      const openDevTools = () => {
+        controller.openDevTools();
       };
 
       const openUrl = () => {
@@ -2318,7 +2414,15 @@ window.__ModuleLoader__.load({
       }
 
       const commandDisabled = state.busy || tabBusy;
-      return h('div', { className: 'bh-root' },
+      return h('div', {
+        className: 'bh-root',
+        onKeyDown: (event) => {
+          if (event.key !== 'F12') return;
+          event.preventDefault();
+          event.stopPropagation();
+          openDevTools();
+        },
+      },
         h('style', null, STYLE),
         h('div', { className: 'bh-bar' },
           h('div', {
@@ -2326,6 +2430,11 @@ window.__ModuleLoader__.load({
             title: state.busy ? 'Agent 正在操作' : 'Agent 空闲',
             'aria-label': state.busy ? 'Agent 正在操作' : 'Agent 空闲',
           }),
+          backendLabel ? h('span', {
+            className: 'bh-backend ' + backend.backend,
+            title: backendTitle,
+            'aria-label': '后端模式：' + backendLabel,
+          }, backendLabel) : null,
           activePage && activePage.loading
             ? h('span', { className: 'bh-page-loading', title: '页面正在加载', 'aria-label': '页面正在加载' }, '加载中')
             : null,
@@ -2394,7 +2503,19 @@ window.__ModuleLoader__.load({
             disabled: commandDisabled,
             onClick: createTab,
           }, '+'),
+          h('button', {
+            className: 'bh-icon-button bh-devtools-button',
+            type: 'button',
+            title: '打开轻量页面的开发者工具（F12）',
+            'aria-label': '打开轻量页面的开发者工具',
+            disabled: !activePage,
+            onClick: openDevTools,
+          }, '开发者工具'),
         ),
+        backend && backend.backend === 'real'
+          ? h('div', { className: 'bh-backend-note', role: 'note' },
+            '真实模式下，工具在独立浏览器窗口操作；本面板保留轻量页面，不与独立窗口同步。')
+          : null,
         state.pages.length > 0
           ? h('div', { className: 'bh-tabs', role: 'tablist', 'aria-label': '浏览器标签' }, state.pages.map((page) =>
             h('div', { key: page.id, className: 'bh-tab' + (page.active ? ' active' : '') },

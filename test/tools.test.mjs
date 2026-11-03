@@ -76,11 +76,11 @@ const frameA = {
   ],
 }
 
-test('19 个工具都注册且 schema 只用受支持关键字', () => {
+test('20 个工具都注册且 schema 只用受支持关键字', () => {
   const tools = buildBrowserTools(makeDeps([frameA]))
-  assert.equal(tools.length, 19)
+  assert.equal(tools.length, 20)
   const names = tools.map((t) => t.name)
-  for (const required of ['browser_open', 'browser_snapshot', 'browser_wait', 'browser_click', 'browser_select', 'browser_upload', 'browser_dialog', 'browser_nav', 'browser_close']) {
+  for (const required of ['browser_backend', 'browser_open', 'browser_snapshot', 'browser_wait', 'browser_click', 'browser_select', 'browser_upload', 'browser_dialog', 'browser_nav', 'browser_close']) {
     assert.ok(names.includes(required), `缺少 ${required}`)
   }
   const allowed = new Set(['type', 'oneOf', 'properties', 'required', 'additionalProperties', 'items', 'enum', 'const', 'description', 'title', 'default', 'examples'])
@@ -338,4 +338,23 @@ test('失败结果渲染成一行可读错误', async () => {
   const tools = toolset(deps)
   const text = await run(tools.browser_snapshot, {}, 's-fail')
   assert.ok(text.includes('browser_snapshot failed: NO_CLIENT'), text)
+})
+
+test('browser_backend 默认查询状态，connect 必须显式给 endpoint', async () => {
+  const deps = makeDeps([frameA])
+  const calls = []
+  deps.backend = {
+    execute: async (sessionId, args) => {
+      calls.push({ sessionId, args })
+      return { ok: true, backend: 'embedded', previousBackend: 'embedded', real: { connected: false } }
+    },
+  }
+  const tools = toolset(deps)
+  const text = await run(tools.browser_backend, {}, 's-backend')
+  assert.equal(calls[0].args.action, 'status')
+  assert.ok(text.includes('backend: embedded'), text)
+  const value = await tools.browser_backend.execute({ action: 'connect' }, { agent: { id: 's-backend' } })
+  assert.equal(value.ok, false)
+  assert.equal(value.error.code, 'BAD_ARGUMENTS')
+  assert.equal(calls.length, 1)
 })

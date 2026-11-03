@@ -2,6 +2,30 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 0.6.0 — 2026-11-03
+
+### 新增
+
+- **Playwright 双后端**：默认保留轻量 Electron `<webview>`；`browser_backend` 可显式启动可见 Chrome/Edge、
+  连接 loopback CDP、切回内嵌或断开真实连接。工具总数由 19 增至 20。
+- **按会话隔离的真实浏览器 profile**：持久与临时两种模式；不读取/复制日常浏览器凭证，
+  已有浏览器页仅在 `pageUrl` 精确匹配时显式共享。
+- **原生开发者体验**：真实窗口使用原生 F12；轻量侧边栏增加开发者工具入口与后端模式徽标。
+- **真实后端完整操作链**：结构化快照、定位引用、点击/输入/按键/滚动、条件等待、标签、导航、
+  选择、上传、对话框、控制台、网络、截图与受限 eval 复用现有 `browser_*` 工具契约。
+
+### 安全与可靠性
+
+- 启动/连接成功后才切换后端；任何真实浏览器错误都不会自动回退到轻量页面。
+- `launch` 与 `connect` 是显式操作，不伪装 UA、不隐藏自动化、不承诺绕过网站风控。
+- 配置新增 `realBrowser.browser/profileDir/startupTimeoutMs`；`playwright-core` 锁定版本且不下载浏览器。
+
+### 验证与已知限制
+
+- 全量自动化 **68 / 68 通过**；Edge 真实后端最终复测 **3 / 3 通过**，发布包 dry-run 检查通过。
+- DSH 0.2.1-rc.5 desktop 实测真实 Chrome 的启动、状态、导航、选择、上传、prompt、等待与截图。
+- rc.5 打包版主进程固定禁用 guest `devTools`，内嵌入口会明确显示 `DEVTOOLS_UNAVAILABLE`；可靠 DevTools 请使用真实浏览器原生 F12。
+
 ## 0.5.0 — 2026-11-03
 
 ### 新增

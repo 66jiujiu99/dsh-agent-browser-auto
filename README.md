@@ -2,17 +2,17 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-0.2.1--rc.2-6f42c1.svg)](#兼容性)
-[![Tests](https://img.shields.io/badge/tests-59%2F59%20pass-brightgreen.svg)](#验收状态2026-11-03-实测)
+[![Tests](https://img.shields.io/badge/tests-68%2F68%20pass-brightgreen.svg)](#验收状态2026-11-03-实测)
 
-给 DSH 桌面版装上「看得见的手」：模型用 `browser_*` 工具**看见并操作**右侧边栏里一个**用户可见**的浏览器页面。
-页面是本插件自己向主进程申请 lease 后创建的 Electron `<webview>`，不碰官方「浏览器」tab 的 DOM（合规、不随上游升级碎裂）。
+给 DSH 桌面版装上「看得见的手」：模型用 `browser_*` 工具看见并操作用户可见的浏览器页面。
+默认是右侧边栏里的轻量 Electron `<webview>`；需要完整浏览器能力时，可显式切换到独立 Agent profile 的真实 Chrome/Edge。
 
-- 版本：0.5.0 · 目标：DSH 桌面版 0.2.1-rc.2（Electron 44.7.0）
-- 契约：`PROTOCOL.md`（Host ⇄ Client 的唯一协议，改字段两边一起改）
+- 版本：0.6.0 · 目标：DSH 桌面版 0.2.1-rc.5（Electron 44.7.0）
+- 契约：`PROTOCOL.md`（Host ⇄ Client 协议与双后端路由，改字段两边一起改）
 
-**为什么不是 Playwright / Puppeteer**：那两个库会自己启动一个**独立的无头浏览器**——它看不见、也点不了
-DSH 右侧边栏里那个 `<webview>`，用户还看不到 Agent 在干什么；同时要额外背 150–300 MB 浏览器二进制和一个
-Node 边车进程。本插件复用的是**用户眼前那个真实页面**，并且沿用主进程已经强制好的沙箱策略（见「安全边界」）。
+**为什么有两种模式**：轻量模式启动快、就在侧边栏里，适合普通读取和表单操作；真实模式使用系统 Chrome/Edge
+与 `playwright-core`，提供原生窗口、F12 和完整 Playwright 操作链。`playwright-core` 不下载浏览器，也不会读取或复制日常浏览器 profile。
+两种模式共用工具有参数，但凭证、存储和页面不互相同步；切回轻量模式不会销毁真实浏览器页面。
 
 ## 它长什么样
 
@@ -20,11 +20,11 @@ Node 边车进程。本插件复用的是**用户眼前那个真实页面**，�
 插件会自己把它打开并把右侧栏展开——**用户全程看得见 Agent 在点什么**；关掉 tab 即停止（guest 被释放）。
 
 ```
-模型 ──browser_open/click/type…──▶ Host 工具层（URL 策略 + 审计）
-                                      │  命令进队列，长轮询下发
-右侧边栏 tab（Client）◀───────────────┘
-   └─ <webview>（自建 guest，sandbox、无 Node、无 preload）
-        └─ executeJavaScript（快照/定位）+ sendInputEvent（真实输入）+ capturePage（截图）
+模型 ──browser_*──▶ Host 工具层（URL 策略 + 审计 + 会话后端路由）
+                         ├─ 默认：长轮询 ─▶ 侧边栏 Client ─▶ <webview>
+                         │    └─ executeJavaScript + sendInputEvent + capturePage
+                         └─ 显式真实模式：Playwright ─▶ 系统 Chrome/Edge
+                              └─ 每会话专用持久/临时 profile，或 loopback CDP 显式连接
 ```
 
 ### P2 侧边栏
@@ -33,6 +33,19 @@ Node 边车进程。本插件复用的是**用户眼前那个真实页面**，�
 - **导航与标签**：后退/前进/刷新；新建、切换、独立关闭标签。
 - **真实状态**：显示真实 loading/failure，失败可重试。
 - **事件驱动同步**：真人点击页面后，地址栏 URL 与标签标题随页面事件同步。
+- **开发者工具与模式标识**：真实窗口使用原生 F12；轻量侧边栏提供 DevTools 入口（取决于宿主支持）和后端模式徽标。
+
+### 双后端与凭证隔离
+
+| 后端 | 如何进入 | 页面/凭证范围 | 退出与保留 |
+|---|---|---|---|
+| 轻量内嵌（默认） | 不需要设置 | 沿用插件现有共享存储分区；各会话独立 guest | 切到真实模式不销毁轻量页面 |
+| 真实浏览器·持久 profile | `browser_backend {action:"launch"}` | 每个 Agent 会话使用独立 Chrome/Edge profile；不复制日常浏览器 Cookie | `embedded` 仅切回；`disconnect` 断开；`closeBrowser:true` 关闭本 session 启动的浏览器 |
+| 真实浏览器·临时 profile | `launch` + `temporary:true` | 会话隔离，浏览器上下文关闭时删除 | 适合一次性任务，不保存登录态 |
+| 连接已有浏览器 | `connect` + loopback `endpoint` | 默认只控制 Agent 新建页；已有页必须再用 `pageUrl` 精确分享 | 非本插件启动的浏览器不会被插件强制关闭 |
+
+模式按 **Agent session** 保存，启动/连接成功后才切换，失败不会自动回退。真实窗口使用浏览器原生 F12。
+这不是风控绕过或“环境伪装”功能，不隐藏自动化，不修改 UA，不同步 Cookie；目标网站仍可提示异常或拒绝访问。
 
 ## 安装
 
@@ -63,7 +76,8 @@ git clone https://github.com/66jiujiu99/dsh-agent-browser-auto.git
 
 也可以 GitHub → **Code → Download ZIP** 解压（那就回到第 0 步先解除下载锁）。
 
-本插件**不发布 npm 包，也不需要 `npm install`**——它零依赖，直接就是可加载的 DSH 插件目录。
+本插件不发布 npm 包。运行依赖只有锁定版本的 `playwright-core`；通过 `plugin_manager install_bundle` 安装时由 DSH 处理依赖。
+它不会下载 Chromium，真实模式只使用本机已安装的 Chrome/Edge。若要在源码目录单独运行测试，先执行 `pnpm install`。
 
 ### 第 2 步：装进 DSH
 
@@ -90,11 +104,12 @@ plugin_manager remove_bundle target=dsh-agent-browser-auto     # 再移除
 
 审计/调试数据不会自动删除，如需清理：删掉 `~/.dsh/storages/agent-browser-auto/` 即可。
 
-## 工具面（19 个）
+## 工具面（20 个）
 
 | 工具 | 作用 | 说明 |
 |---|---|---|
-| `browser_open` | 打开 URL 并回快照 | `newTab` 可在面板内新开一页 |
+| `browser_backend` | 查询/切换浏览器后端 | `status` / `launch` / `connect` / `embedded` / `disconnect`；按 Agent 会话生效，绝不自动切换 |
+| `browser_open` | 打开 URL 并回快照 | `newTab` 可在当前后端新开一页 |
 | `browser_snapshot` | 重拍快照 | `maxElements`（默认 80）/`text`（默认 false，最省 token）/`textLimit`（默认 3000）/`scope`（默认 `viewport`） |
 | `browser_wait` | 等条件成立后回快照 | `text` / `selector` / `url` 三选一；`state:"hidden"` 等消失；`timeoutMs` 默认 10000 |
 | `browser_click` | 点 `@ref` 或视口坐标 | 先走真实输入管线，无反应才退回 DOM click |
@@ -176,6 +191,9 @@ stats: 1 elements, 74 chars, ~19 tokens (scope=viewport)
 | `deepMode.endpoint` | `""` | 空 = 读 `portFile` 拼 `http://127.0.0.1:<port>`；非空直接用（仅允许 loopback） |
 | `deepMode.maxNodes` | `200` | 深度快照默认最多返回节点数 |
 | `deepMode.timeoutMs` | `8000` | 单条 CDP 命令超时 |
+| `realBrowser.browser` | `auto` | 真实模式依次选择 `chrome` / `edge`，也可固定一种；不会下载浏览器 |
+| `realBrowser.profileDir` | `~/.dsh/storages/agent-browser-auto/real-browser-profiles` | 每会话专用持久 profile 的根目录，不使用日常浏览器目录 |
+| `realBrowser.startupTimeoutMs` | `30000` | 启动或连接真实浏览器的超时（1000–120000ms） |
 
 ## 深度模式（CDP，可选，默认关闭）
 
@@ -278,14 +296,22 @@ JavaScript，没有任何编译产物或下载执行步骤。这也是本仓库�
 也就是说，任何插件都拿得到和你同等的本机权限。请只安装你读过或信任的插件；本仓库全部是可读 JavaScript，
 无编译产物、无运行时下载执行，便于你自行审阅。
 
+### 真实浏览器模式的额外边界
+
+- Electron 沙箱硬边界只保护轻量 `<webview>`；真实模式使用系统 Chrome/Edge 自身安全模型，权限弹窗、下载和扩展行为不沿用上述 webview 规则。
+- 专用 profile 是**凭证隔离**，不是匿名化：登录状态只保存在对应 Agent 会话目录；网页仍能看到浏览器版本、自动化状态和正常网络信号。
+- 连接已有浏览器仅限 loopback CDP；CDP 本身没有应用层鉴权，本机其它进程也可能连接，故只在你明确需要时开启。
+- 页面与工具文本始终是不可信数据，不把网页内容当指令；不自动输入凭证，不用敏感账户做测试。
+
 ## 兼容性
 
 | 项目 | 要求 | 说明 |
 |---|---|---|
-| DSH 版本 | **0.2.1-rc.2**（实测） | 插件依赖 desktop 的 webview lease API 与 side-bar tab 槽位 |
+| DSH 版本 | **0.2.1-rc.5**（0.6.0 实测） | 插件依赖 desktop 的 webview lease API 与 side-bar tab 槽位 |
 | 运行形态 | **仅桌面版**（Electron） | Web 端没有 `dshDesktop` 桥，tab 内只显示提示 |
 | 平台 | Windows（实测）· macOS / Linux 未验证 | 启动器是 Windows 专用；不用深度模式时无平台依赖 |
 | Node | ≥ 20 | 与 DSH 自带运行时一致 |
+| 真实浏览器 | 本机 Chrome 或 Edge | 仅真实模式需要；使用 `playwright-core`，不下载浏览器、不使用日常 profile |
 
 ## 审计与排障
 
@@ -299,60 +325,72 @@ JavaScript，没有任何编译产物或下载执行步骤。这也是本仓库�
 ## 已知限制
 
 1. **仅桌面版**：Web 端没有 `dshDesktop` 桥，tab 里只显示「只在桌面版可用」。
-2. **必须有一个屏幕上的会话**：浏览器 tab 按会话挂载；工具调用落在后台会话时回 `NO_CLIENT`（会提示先切过去）。
-3. **关掉右栏/关掉 tab 后命令不可达**：会立刻回 `NO_CLIENT`，不会排队等到你打开。
-4. **`browser_eval` 受页面 CSP 限制**（部分站点禁止 `eval`），失败会给可读错误。
-5. **截图是视口截图**：`fullPage` 通过临时拉高元素高度实现，超长页面最多截 4000px。
-6. **下载/摄像头/地理位置**被主进程硬禁用；文件上传仅走 `browser_upload` 的受控文件 input 通道，边界见上。
+2. **轻量模式必须有一个屏幕上的会话**：浏览器 tab 按会话挂载；工具调用落在后台会话时回 `NO_CLIENT`（会提示先切过去）。真实模式使用独立窗口，不依赖侧边栏保活。
+3. **轻量模式关掉右栏/关掉 tab 后命令不可达**：会立刻回 `NO_CLIENT`，不会排队等到你打开。
+4. **轻量模式的 `browser_eval` 受页面 CSP 限制**（部分站点禁止 `eval`），失败会给可读错误。
+5. **轻量模式截图**：`fullPage` 通过临时拉高元素高度实现，超长页面最多截 4000px；真实模式使用 Playwright 原生整页截图。
+6. **轻量模式的下载/摄像头/地理位置**被主进程硬禁用；文件上传仅走 `browser_upload` 的受控文件 input 通道，边界见上。
 7. Client 半边热更会重建页面：HMR 之后原来的页面对象与 guest 会丢失，需要重新 `browser_open`（Host 会回 `NO_CLIENT`/`NO_PAGE` 提示重开）。
 8. **深度模式需要重启**：随机调试端口只在用 `tools/start-dsh-debug.cmd` 启动的那次会话里存在；
    普通启动没有端口，`browser_deep_snapshot` 会回 `DEEP_UNAVAILABLE`。关闭 DSH 再正常启动即可恢复默认（无端口）。
+9. **两种后端不共享页面与凭证**：真实模式的标签不会出现在轻量面板列表中；切回后端只改变后续命令去向，不迁移页面。
+10. **内嵌 DevTools 取决于宿主**：DSH 0.2.1-rc.5 打包版在 `will-attach-webview` 中固定 `devTools: !app.isPackaged`，插件无法覆盖；按钮会显示 `DEVTOOLS_UNAVAILABLE`。需要可靠 DevTools 时请显式启动真实 Chrome/Edge 并使用原生 F12。
 
 ## 验收状态（2026-11-03 实测）
 
 | 需求 | 状态 | 证据 |
 |---|---|---|
-| R1.1 打开并拿到结构化快照 | ✅ | `example.com` / `baidu.com` 实测 |
-| R1.2 ref 稳定 + 失效自愈 | ✅ | 提交搜索后点旧 ref 自动按「角色+名字」找回 |
-| R1.3 点击/输入/按键/滚动/导航 | ✅ | 百度：输入「DeepSeek 官网」→ 提交 → 点「视频」→ 后退 → 滚动 600 |
-| R1.4 截图 | ✅ | `shots/*.png` 817×880，`read_image` 能看到真实渲染 |
-| R1.5 用户可见 | ✅ | 工具调用自动 `openTab` 打开右侧栏面板 |
-| R1.6 会话绑定 | ✅ | 每个 session 一个控制器 + 独立 guest |
-| R1.7 错误可读 | ✅ | `LOAD_FAILED`（维基百科被网络拦截时给出原因）、`NO_REF`、`EVAL_DISABLED`、`NO_CLIENT` |
-| R1.8 审计 | ✅ | `audit.jsonl` 17+ 条，`debug.jsonl` 全链路 |
-| P1 console/network/tabs/eval | ✅ | console 0→N 条、network 含主文档、多页 new/switch、eval 默认拒绝 |
+| R1 轻量快照、操作、截图、标签与审计 | ✅ | 0.5.0 desktop 实测；本轮默认内嵌 `browser_open` 复测通过 |
+| R2.1 显式真实 Chrome 后端 | ✅ | desktop 完成 launch/status/open/select/upload/prompt/wait/screenshot |
+| R2.2 双后端隔离与 CDP 分享边界 | ✅ | 独立 profile、失败不自动回退、已有页精确分享、外部页面保留均有自动化覆盖 |
+| R2.3 侧边栏模式徽标 | ✅ | DSH 0.2.1-rc.5 desktop 可见「轻量内嵌」与开发者工具入口 |
+| R2.4 内嵌 DevTools 窗口 | ⚠️ 宿主限制 | rc.5 打包版禁用 guest `devTools`；按钮与 `DEVTOOLS_UNAVAILABLE` 提示已实测，不将窗口打开记为通过 |
 
-**验证方法（可复现）**
+### 0.6.0 自动化结果
 
-```bash
-# 单元测试：快照渲染 / 差分 / 工具参数 / CDP 错误映射（59 项）
-ELECTRON_RUN_AS_NODE=1 "C:\Data\APP\dsh\DeepSeek Harness.exe" --test test/*.test.mjs
+- 全量命令 **68 / 68 通过**：快照与工具参数、后端路由与 lossless JSON、CDP 集成、真实 Chrome 操作链及资源清理。
+- Edge 最终复测 **3 / 3 通过**；Chrome 与 Edge 的 CDP 附加/外部页面保留测试均通过。
+- `pnpm pack --dry-run --json` 通过：包含 `lib/real-driver.js`，不包含测试、profile 或运行截图。
+- 真实浏览器测试只访问 `127.0.0.1` 夹具，不使用日常浏览器 profile，也不接触敏感账户。
 
-# CDP 集成测试：用真 Chrome（headless + 随机端口）当靶子，不碰你的 DSH
-node C:\Data\deepseek\_probe-cdp\run.mjs
+### 0.6.0 desktop 实测
+
+- 默认仍为轻量内嵌；显式启动真实 Chrome 成功，状态输出通过 DSH 工具 schema 与 lossless JSON 校验。
+- 本地夹具完成下拉选择、文件上传、prompt 往返回读、延迟 selector 等待和真实窗口截图。
+- 切回内嵌后 `browser_open` 与结构化快照正常；后端状态保持可查询。
+- 内嵌 DevTools 仅确认按钮与 API 调用路径，**没有确认窗口打开**；真实 Chrome 的 DevTools 由浏览器原生提供。
+
+### 验证方法（可复现）
+
+先执行 `pnpm install`，再在仓库根目录运行：
+
+```powershell
+# 全量：单元 + CDP + 默认真实 Chrome/Edge 操作链
+node --test --test-concurrency=1 test/snapshot.test.mjs test/tools.test.mjs test/backend.test.mjs test/cdp.test.mjs test/real-driver.test.mjs test/real-driver-cdp.test.mjs
+
+# 指定 Edge 复测真实后端与 CDP 附加
+$env:REAL_BROWSER = 'edge'
+node --test --test-concurrency=1 test/real-driver.test.mjs test/real-driver-cdp.test.mjs
+Remove-Item Env:REAL_BROWSER
+
+# 检查发布包内容
+pnpm pack --dry-run --json
 ```
 
-**本地 E2E 夹具（可复现）**
+本地 E2E 夹具：
 
-```bash
+```powershell
 node test/fixtures/server.mjs
 ```
 
-`test/fixtures/server.mjs` 只服务 `browser-e2e.html`，启动后打印 `127.0.0.1` 随机端口的 URL。
-页面覆盖导航、延迟、原生/自定义下拉、上传、`alert/confirm/prompt`，可用 `browser_open` 打开后逐项验证。
+`test/fixtures/server.mjs` 只服务 `browser-e2e.html`，启动后打印 `127.0.0.1` URL。页面覆盖导航、延迟、
+原生/自定义下拉、上传与 `alert/confirm/prompt`，可用 `browser_open` 打开后逐项验证。
 
-2026-11-03 在 `0.5.0` 真实 Electron webview 中已验证：
+### 保留的 0.5.0 证据
 
-- 原生下拉按 label / value / index 选择，自定义下拉按 label 选择；错误候选会返回实际选项。
-- 单文件上传成功，页面只显示浏览器生成的 `C:\fakepath\...`，不显示 Host 原始路径。
-- 预置响应后，`alert` 接受、`confirm` 拒绝、`prompt` 自定义文本均产生预期页面结果。
-- 刷新、后退、前进、加载失败后的恢复导航，以及失效 `@ref` 自动补现场快照。
+- 真实 Electron webview 已验证原生/自定义下拉、单文件上传、三种对话框、刷新/后退/前进、
+  失败恢复导航与失效 `@ref` 自动补现场快照。
+- 当时单元测试 **59 / 59 通过**，CDP 集成 **17 / 17 通过**；这些历史数字不混入 0.6.0 的 68 项结果。
 
-- 单元测试 **59 / 59 通过**（snapshot 20 · tools 17 · cdp 22）。
-- CDP 集成测试 **17 / 17 通过**：端口文件发现与缓存、`DEEP_UNAVAILABLE` 文案、discover、
-  a11y 与 dom 两条读取路线、跨源 iframe（含坐标换算）、各类不可达错误码。
-- 能力边界 **4 / 4 通过**：closed shadow root 可读、canvas 文字不可读（如实记录，不夸大）。
-- 启动器 **6 条路径**全部实测：文件缺失 / 已有实例 / 成功 / 探活失败 / 超时 / 残留端口文件清理。
-
-> 说明：以上数字都来自本机实测，不是设计目标。59 / 59 仅指单元测试，不是 59 项真实网页 E2E；
-> 夹具存在不代表所有项目均已实测。未在 macOS / Linux 上验证过，因此不做声明。
+> 说明：以上数字都来自本机实测，不是设计目标。68 / 68 包含单元、CDP 与本地真实浏览器测试，
+> 不表示 68 项外部网站 E2E。未在 macOS / Linux 上验证过，因此不做声明。

@@ -1,9 +1,22 @@
 # agent-browser-auto 插件内部协议（Host ⇄ Client）
 
 本文件是 Host 半边（`index.js`）与 Client 半边（`client.js`）之间的**唯一契约**。
-两边都按本文件实现，不允许各自发明字段。
+两边都按本文件实现，不允许各自发明字段。0.6.0 起 Host 在工具前增加按 session 的后端路由：
+默认仍走本文 Host ⇄ Client 协议；显式 `browser_backend launch/connect` 成功后，普通 `browser_*` op 改由
+`lib/real-driver.js` 的 Playwright 后端执行，op/args/value 的工具契约保持一致。真实后端失败绝不自动回退到 Client。
 
-## 0. 运行环境事实（已取证，不要重新假设）
+## 0.1 后端控制（Host 直执行，不进 Client 队列）
+
+`browser_backend` 支持：
+- `status`：返回 `{backend,previousBackend,real,message}`；`backend` 为 `embedded|real`。
+- `launch`：可见系统 Chrome/Edge + 当前 session 专用持久 profile；`temporary:true` 使用临时 profile。
+- `connect`：显式 loopback CDP `endpoint`；已有页只有提供精确 `pageUrl` 才共享，否则仅控制 Agent 新建页。
+- `embedded`：只切换路由，保留真实浏览器连接和页面。
+- `disconnect`：释放真实后端并切回 embedded；`closeBrowser:true` 同时关闭本 session 启动的浏览器。
+
+后端状态按 session 隔离；Cookie/localStorage 不在两端复制或同步。真实模式不伪装 UA、不隐藏自动化、不承诺规避网站风控。
+
+## 0.2 运行环境事实（已取证，不要重新假设）
 
 - 桌面版主窗口 `webviewTag: true`，主窗口主 frame 可 `document.createElement('webview')`。
 - preload 暴露 `globalThis.dshDesktop = { protocolVersion: 1, browser: { acquire(workspaceKey), release(lease), onOpenRequested(lease, cb) } }`。
@@ -34,8 +47,8 @@
 
 ### 1.1 hello
 请求：`{"clientId":"c-<uuid>","sessionId":"<sessionId|null>","desktop":true}`
-响应：`{"ok":true,"version":1,"config":{"enableEval":false,"maxSnapshotBytes":8192}}`
-Host 记录 client 的 `sessionId`（每次 hello 覆盖）。Client **每 10s** 发一次 hello 保活。
+响应：`{"ok":true,"version":1,"config":{"enableEval":false,"maxSnapshotBytes":8192},"backend":{"ok":true,"backend":"embedded","previousBackend":"embedded","real":{"connected":false}}}`
+`backend` 由 Host 按 session 注入，Client 只用于模式徽标，不据此自行切换。Host 记录 client 的 `sessionId`（每次 hello 覆盖）。Client **每 10s** 发一次 hello 保活。
 
 ### 1.2 poll
 Client 循环调用；Host 挂起最多 `wait` 毫秒。
@@ -141,6 +154,7 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
+| `browser_backend` | `action:"status|launch|connect|embedded|disconnect"`, `browser?`, `temporary?`, `endpoint?`, `pageUrl?`, `closeBrowser?` | Host 直执行；按 session 查询/切换后端，不进入 Client 队列 |
 | `browser_open` | `url`, `newTab?`, `waitMs?`, `scope?` | 打开并回快照 |
 | `browser_snapshot` | `maxElements?`, `text?`, `textLimit?`, `scope?` | 回快照（`text` 默认 false，最省 token） |
 | `browser_wait` | `text`/`selector`/`url` 其一, `state?`, `timeoutMs?`, `snapshot?` | 条件等待并回现场视口 |
