@@ -2,12 +2,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-0.2.1--rc.2-6f42c1.svg)](#兼容性)
-[![Tests](https://img.shields.io/badge/tests-51%2F51%20pass-brightgreen.svg)](#验收状态2026-10-23-实测)
+[![Tests](https://img.shields.io/badge/tests-55%2F55%20pass-brightgreen.svg)](#验收状态2026-11-03-实测)
 
 给 DSH 桌面版装上「看得见的手」：模型用 `browser_*` 工具**看见并操作**右侧边栏里一个**用户可见**的浏览器页面。
 页面是本插件自己向主进程申请 lease 后创建的 Electron `<webview>`，不碰官方「浏览器」tab 的 DOM（合规、不随上游升级碎裂）。
 
-- 版本：0.1.0 · 目标：DSH 桌面版 0.2.1-rc.2（Electron 44.7.0）
+- 版本：0.3.0 · 目标：DSH 桌面版 0.2.1-rc.2（Electron 44.7.0）
 - 契约：`PROTOCOL.md`（Host ⇄ Client 的唯一协议，改字段两边一起改）
 
 **为什么不是 Playwright / Puppeteer**：那两个库会自己启动一个**独立的无头浏览器**——它看不见、也点不了
@@ -83,12 +83,13 @@ plugin_manager remove_bundle target=dsh-agent-browser-auto     # 再移除
 
 审计/调试数据不会自动删除，如需清理：删掉 `~/.dsh/storages/agent-browser-auto/` 即可。
 
-## 工具面（15 个）
+## 工具面（16 个）
 
 | 工具 | 作用 | 说明 |
 |---|---|---|
 | `browser_open` | 打开 URL 并回快照 | `newTab` 可在面板内新开一页 |
 | `browser_snapshot` | 重拍快照 | `maxElements`（默认 80）/`text`（默认 false，最省 token）/`textLimit`（默认 3000）/`scope`（默认 `viewport`） |
+| `browser_wait` | 等条件成立后回快照 | `text` / `selector` / `url` 三选一；`state:"hidden"` 等消失；`timeoutMs` 默认 10000 |
 | `browser_click` | 点 `@ref` 或视口坐标 | 先走真实输入管线，无反应才退回 DOM click |
 | `browser_type` | 输入文本 | `clear` 先清空、`submit` 回车/提交表单 |
 | `browser_press` | 按键 | Enter/Tab/Escape/方向键/PageUp/PageDown/Home/End/Space |
@@ -102,6 +103,11 @@ plugin_manager remove_bundle target=dsh-agent-browser-auto     # 再移除
 | `browser_network` | 请求近况 | 主文档 navigation entry + fetch/XHR 包装 + Resource Timing 兜底 |
 | `browser_eval` | 执行 JS | **默认关闭**（`enableEval`） |
 | `browser_close` | 释放页面 | 同时销毁 guest |
+
+动作后会自动等待页面稳定：loading 或 DOM 持续变化时重置安静窗口，连续约 300ms 稳定即返回，
+最多等 5 秒；需要等待指定内容时用 `browser_wait`，例如 `{selector:"#loading",state:"hidden"}`。
+`NO_REF` 和 `WAIT_TIMEOUT` 默认同时返回错误与当前视口，模型可以直接选择现场里的元素恢复，
+不必先补一次快照；显式 `snapshot:false` 可关闭。
 
 快照形如（视口优先，默认不发正文）：
 
@@ -280,7 +286,7 @@ JavaScript，没有任何编译产物或下载执行步骤。这也是本仓库�
 8. **深度模式需要重启**：随机调试端口只在用 `tools/start-dsh-debug.cmd` 启动的那次会话里存在；
    普通启动没有端口，`browser_deep_snapshot` 会回 `DEEP_UNAVAILABLE`。关闭 DSH 再正常启动即可恢复默认（无端口）。
 
-## 验收状态（2026-10-23 实测）
+## 验收状态（2026-11-03 实测）
 
 | 需求 | 状态 | 证据 |
 |---|---|---|
@@ -297,14 +303,14 @@ JavaScript，没有任何编译产物或下载执行步骤。这也是本仓库�
 **验证方法（可复现）**
 
 ```bash
-# 单元测试：快照渲染 / 差分 / 工具参数 / CDP 错误映射（51 项）
+# 单元测试：快照渲染 / 差分 / 工具参数 / CDP 错误映射（55 项）
 ELECTRON_RUN_AS_NODE=1 "C:\Data\APP\dsh\DeepSeek Harness.exe" --test test/*.test.mjs
 
 # CDP 集成测试：用真 Chrome（headless + 随机端口）当靶子，不碰你的 DSH
 node C:\Data\deepseek\_probe-cdp\run.mjs
 ```
 
-- 单元测试 **51 / 51 通过**（snapshot 19 · tools 10 · cdp 22）。
+- 单元测试 **55 / 55 通过**（snapshot 20 · tools 13 · cdp 22）。
 - CDP 集成测试 **17 / 17 通过**：端口文件发现与缓存、`DEEP_UNAVAILABLE` 文案、discover、
   a11y 与 dom 两条读取路线、跨源 iframe（含坐标换算）、各类不可达错误码。
 - 能力边界 **4 / 4 通过**：closed shadow root 可读、canvas 文字不可读（如实记录，不夸大）。

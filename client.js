@@ -596,6 +596,40 @@ window.__ModuleLoader__.load({
             activeRef: active && S.byEl ? S.byEl.get(active) || null : null,
           };
         }
+        case 'waitProbe': {
+          var waitState = args.state === 'hidden' ? 'hidden' : 'visible';
+          var waitUrl = location.href;
+          var waitMatched = false;
+          if (typeof args.url === 'string') {
+            // URL 条件只看当前地址，state 对 URL 不适用。
+            waitMatched = waitUrl.indexOf(args.url) >= 0;
+          } else if (typeof args.selector === 'string') {
+            var waitElement = null;
+            try {
+              // 主文档 selector；不可用选择器必须让调用方立即知道。
+              waitElement = document.querySelector(args.selector);
+            } catch (e) {
+              return {
+                ok: false,
+                code: 'INVALID_SELECTOR',
+                message: String(e && e.message ? e.message : e),
+              };
+            }
+            var waitVisible = !!waitElement && isVisible(waitElement);
+            waitMatched = waitState === 'hidden' ? !waitVisible : waitVisible;
+          } else if (typeof args.text === 'string') {
+            var waitBodyText = '';
+            try {
+              // innerText 只包含可见正文，不包含 display:none 等隐藏文本。
+              waitBodyText = String(document.body ? document.body.innerText || '' : '');
+            } catch (e) {
+              waitBodyText = '';
+            }
+            var waitTextFound = waitBodyText.indexOf(args.text) >= 0;
+            waitMatched = waitState === 'hidden' ? !waitTextFound : waitTextFound;
+          }
+          return { ok: true, matched: waitMatched, url: waitUrl };
+        }
         case 'rect': {
           var found = resolveLoose(args.ref);
           if (!found) return { ok: false, code: 'NO_REF' };
@@ -1134,6 +1168,10 @@ window.__ModuleLoader__.load({
           if (!value || value.ok !== true) throw err((value && value.code) || 'INTERNAL', (value && value.message) || '查找失败');
           return { query: value.query, matches: value.matches };
         }
+        case 'wait': {
+          const page = await controller.ensurePage();
+          return waitPage(page, args);
+        }
         case 'click': {
           const page = await controller.ensurePage();
           const result = await clickPage(page, args, lastFull);
@@ -1267,16 +1305,92 @@ window.__ModuleLoader__.load({
       return value;
     }
 
-    /** 动作之后等页面静下来（网络/渲染），再拍快照。任何异常都吞掉：它只是节流用的等待。 */
+    /**
+     * 动作之后等页面静下来（网络/渲染），再拍快照。
+     * 总预算约 5 秒；连续 300ms 没有 loading 且 DOM mutations 不变即可提前返回。
+     * 任何异常都吞掉：它只是优化等待，不能让动作失败。
+     */
     async function settle(page) {
+      const deadline = Date.now() + 5000;
       try {
-        await sleep(180);
-        for (let attempt = 0; attempt < 12; attempt += 1) {
-          if (!page.loading) break;
-          await sleep(150);
+        // 给点击/输入等动作一个触发渲染与导航的窗口。
+        await sleep(120);
+        let previousMutations;
+        let quietSince = Date.now();
+        while (Date.now() < deadline) {
+          let state = null;
+          try {
+            state = await page.exec('state', {});
+          } catch (error) {
+            // 跳转期间 exec 可能短暂失败；等待仍受总预算限制。
+            log('debug', 'settle state probe failed', { error });
+          }
+          const now = Date.now();
+          const mutations = state && typeof state.mutations === 'number' ? state.mutations : null;
+          if (page.loading || mutations === null || previousMutations === undefined || mutations !== previousMutations) {
+            quietSince = now;
+          } else if (now - quietSince >= 300) {
+            return;
+          }
+          previousMutations = mutations;
+          if (now >= deadline) return;
+          await sleep(Math.min(120, deadline - now));
         }
       } catch (error) {
         log('debug', 'settle skipped', { error });
+      }
+    }
+
+    /** 等待正文、主文档 selector 或 URL 条件成立；导航中的临时 exec 失败可重试。 */
+    async function waitPage(page, args) {
+      const startedAt = Date.now();
+      const timeoutMs = typeof args.timeoutMs === 'number' && Number.isFinite(args.timeoutMs)
+        ? Math.max(0, args.timeoutMs)
+        : 10000;
+      const state = args.state === 'hidden' ? 'hidden' : 'visible';
+      const condition = {};
+      if (typeof args.text === 'string') condition.text = args.text;
+      else if (typeof args.selector === 'string') condition.selector = args.selector;
+      else condition.url = String(args.url ?? '');
+      condition.state = state;
+      const deadline = startedAt + timeoutMs;
+
+      for (;;) {
+        let probe = null;
+        try {
+          probe = await page.exec('waitProbe', {
+            text: args.text,
+            selector: args.selector,
+            url: args.url,
+            state,
+          });
+        } catch (error) {
+          // 页面跳转可能销毁本次执行上下文；明确的选择器错误不能重试。
+          if (error && (error.bhCode === 'INVALID_SELECTOR' || error.code === 'INVALID_SELECTOR')) {
+            throw err('INVALID_SELECTOR', String(error.message || error));
+          }
+          log('debug', 'wait probe failed; retrying', { error });
+        }
+        if (probe && probe.ok === false && probe.code === 'INVALID_SELECTOR') {
+          throw err('INVALID_SELECTOR', probe.message || '无效的 CSS selector');
+        }
+
+        const now = Date.now();
+        if (probe && probe.ok === true && probe.matched) {
+          const value = {
+            action: 'wait',
+            condition,
+            waitedMs: now - startedAt,
+            url: page.url,
+            title: page.title,
+          };
+          if (args.snapshot !== false) value.snapshot = await fullSnapshot(page, args);
+          return value;
+        }
+        if (now >= deadline) {
+          throw err('WAIT_TIMEOUT', '等待条件 ' + JSON.stringify(condition) + ' 在 ' + timeoutMs + 'ms 内未满足');
+        }
+        await sleep(Math.min(120, deadline - now));
       }
     }
 
@@ -1375,10 +1489,12 @@ window.__ModuleLoader__.load({
       if (args.submit === true) {
         const submitted = await page.exec('submit', { ref });
         if (!submitted || submitted.ok !== true) {
-          await pressPage(page, { key: 'Enter', snapshot: false });
+          // pressPage 的独立调用默认会 settle；这里由 typePage 尾部统一等待，避免重复。
+          await pressPage(page, { key: 'Enter', snapshot: false, skipSettle: true });
         }
-        await settle(page);
       }
+      // 普通输入与 submit 共用一次稳定等待。
+      await settle(page);
       const after = await page.exec('state', {});
       const value = {
         action: 'type',
@@ -1426,7 +1542,7 @@ window.__ModuleLoader__.load({
       } else {
         await page.exec('keyFallback', { key, code: mapped.code, keyCode: mapped.vk });
       }
-      await settle(page);
+      if (args.skipSettle !== true) await settle(page);
       const value = { action: 'press', key, url: page.url, title: page.title };
       if (args.snapshot !== false) value.snapshot = await fullSnapshot(page, args);
       return value;
@@ -1457,6 +1573,8 @@ window.__ModuleLoader__.load({
         const measure = await page.exec('measure', {});
         scroll = { y: (await page.exec('state', {})).scrollY, height: measure && measure.height, viewport: measure && measure.viewport };
       }
+      // 滚动可能触发懒加载；快照前等待 DOM 与 loading 稳定。
+      await settle(page);
       const afterState = await page.exec('state', {});
       const value = { action: 'scroll', scroll, changed: !!afterState && !!before && afterState.scrollY !== before.scrollY, url: page.url };
       if (args.snapshot !== false) value.snapshot = await fullSnapshot(page, args);

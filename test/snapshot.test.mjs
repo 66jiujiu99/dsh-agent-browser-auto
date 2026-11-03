@@ -52,6 +52,13 @@ test('renderFullSnapshot 默认视口过滤 + 视口外提示', () => {
   assert.equal(out.hasText, false) // 默认无 text
 })
 
+test('renderFullSnapshot 可见元素为零仍保留视口外提示', () => {
+  const out = renderFullSnapshot({ ...viewportSnapshot, elements: [], offscreen: 1 })
+  assert.equal(out.scope, 'viewport')
+  assert.equal(out.offscreen, 1)
+  assert.deepEqual(out.lines, [OFFSCREEN_NOTICE(1)])
+})
+
 test('renderFullSnapshot text:true 渲染并计入', () => {
   const out = renderFullSnapshot({ ...viewportSnapshot, text: '这是正文内容' })
   assert.equal(out.hasText, true)

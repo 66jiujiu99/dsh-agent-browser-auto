@@ -773,11 +773,11 @@ test('工具层：端口可达时返回节点表并渲染坐标', async () => {
   }
 })
 
-test('工具层：15 个工具全部注册，deep 工具 schema 合法', () => {
+test('工具层：16 个工具全部注册，deep 工具 schema 合法', () => {
   const tools = buildBrowserTools(deepDeps({
     enabled: false, portFile: '', endpoint: '', maxNodes: 200, timeoutMs: 8000,
   }))
-  assert.equal(tools.length, 15)
+  assert.equal(tools.length, 16)
   const names = tools.map((tool) => tool.name)
   assert.ok(names.includes('browser_deep_snapshot'))
   const allowed = new Set(['type', 'oneOf', 'properties', 'required', 'additionalProperties', 'items', 'enum', 'const', 'description', 'title', 'default', 'examples'])

@@ -99,6 +99,7 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 |---|---|---|
 | `open` | `{url, newTab?:boolean, waitMs?:number, scope?:("viewport"\|"document")}` | `{pageId, url, title, snapshot}` |
 | `snapshot` | `{maxElements?:number, text?:boolean, textLimit?:number, scope?:("viewport"\|"document")}` | `{snapshot}` |
+| `wait` | `{text\|selector\|url, state?:("visible"\|"hidden"), timeoutMs?:number, snapshot?:boolean, scope?:"viewport"}` | `{action:"wait", condition, waitedMs, url, title, snapshot?}` |
 | `click` | `{ref?} \| {x?,y?}, snapshot?:boolean, scope?:("viewport"\|"document")}` | `{action:"click", changed:boolean, snapshot?}` |
 | `type` | `{ref, text, clear?:boolean, submit?:boolean, snapshot?:boolean, scope?:("viewport"\|"document")}` | `{action:"type", changed:boolean, snapshot?}` |
 | `press` | `{key, snapshot?:boolean, scope?:("viewport"\|"document")}` | `{action:"press", changed:boolean, snapshot?}` |
@@ -114,7 +115,9 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 | `ping` | `{}` | `{pong:true, pageCount:number}` |
 
 补充约定：
-- `snapshot` 默认 `true`（除非显式 `false`），即动作后回一张新快照。
+- `snapshot` 默认 `true`（除非显式 `false`），即动作/等待后回一张新快照。
+- 动作后 `settle` 最长等待约 5 秒：页面 loading 或 DOM mutations 持续变化时重置安静计时，连续约 300ms 稳定即提前返回；持续动画到上限也正常回快照，不让动作失败。
+- `wait` 的 `text / selector / url` 必须恰好一个；`text` 匹配可见正文，`selector` 匹配主文档 CSS，`url` 匹配 URL 子串。`state:hidden` 仅用于 text/selector 的消失或隐藏；`timeoutMs` 默认 10000。
 - `changed`：动作是否让页面发生了变化（URL 变化、DOM 变更计数增加、或 input 值变化）。
 - `click` 的坐标路径：`{x,y}` 是 webview **视口内**坐标（左上为原点）。
 - `screenshot` 的 `path` 是 Host 可读的**绝对路径**：Client 通过 `POST /agent-browser-auto/shot` 上传 PNG 二进制，
@@ -123,8 +126,8 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 
 ### 2.3 错误码（Client → Host，写在 result.error.code）
 `NO_PAGE`（没有页面）、`NO_REF`（ref 不存在/已失效）、`NAV_BLOCKED`（URL 不合法或被策略拒绝）、
-`TIMEOUT`（页面在 waitMs 内未加载完）、`LOAD_FAILED`（did-fail-load）、`EVAL_DISABLED`、
-`NOT_DESKTOP`（web 客户端）、`INTERNAL`（其它，必须带 message 与 data.error）。
+`TIMEOUT`（页面在 waitMs 内未加载完）、`WAIT_TIMEOUT`（条件等待超时）、`INVALID_SELECTOR`（CSS 选择器无效）、
+`LOAD_FAILED`（did-fail-load）、`EVAL_DISABLED`、`NOT_DESKTOP`（web 客户端）、`INTERNAL`（其它，必须带 message 与 data.error）。
 
 ## 3. Host 侧工具（模型看到的）
 
@@ -132,6 +135,7 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 |---|---|---|
 | `browser_open` | `url`, `newTab?`, `waitMs?`, `scope?` | 打开并回快照 |
 | `browser_snapshot` | `maxElements?`, `text?`, `textLimit?`, `scope?` | 回快照（`text` 默认 false，最省 token） |
+| `browser_wait` | `text`/`selector`/`url` 其一, `state?`, `timeoutMs?`, `snapshot?` | 条件等待并回现场视口 |
 | `browser_click` | `ref?` 或 `x`+`y`, `snapshot?` | 点击 |
 | `browser_type` | `ref`, `text`, `clear?`, `submit?`, `snapshot?` | 输入 |
 | `browser_press` | `key`, `snapshot?` | 按键 |
@@ -157,6 +161,8 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 - 总长超过 `maxResultBytes`（默认 12000 字节）时截断，并追加 `… (truncated; use browser_snapshot with maxElements/textLimit)`。
 - 出错时**不要抛异常**：返回 `{ok:false, error:{code,message}}`，render 成
   `browser_open failed: NAV_BLOCKED — 只允许 http/https 且不能是 DSH 自身地址`。
+- `NO_REF` / `WAIT_TIMEOUT` 且未显式 `snapshot:false` 时，Host 用最长 3 秒的恢复命令补一张视口快照，
+  render 为「错误行 + 当前现场」；补拍失败不覆盖原始错误。其它错误不做二次调用。
 - 没有 Client 连着目标会话时：`NO_CLIENT`，message 写清楚「请先在 PC 上打开该会话」。
 
 ## 4. 审计与日志（Host 写文件）

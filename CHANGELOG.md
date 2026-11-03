@@ -2,6 +2,23 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 0.3.0 — 2026-11-03
+
+### 新增
+
+- **`browser_wait` 条件等待**：等待可见正文、主文档 CSS selector 或 URL 子串；text/selector 支持
+  `state:"hidden"`，默认 10 秒、最长 120 秒，命中后直接回当前视口结构。
+- **失败现场快照**：`NO_REF` 与 `WAIT_TIMEOUT` 默认自动补拍当前视口，错误与可恢复操作一次返回；
+  显式 `snapshot:false` 时仍尊重省 token 选择。
+
+### 改进
+
+- **动作后智能稳定等待**：点击、输入、按键、滚动与导航不再只依赖固定 sleep；页面 loading 或
+  DOM mutations 变化会重置安静窗口，连续约 300ms 稳定即返回，总上限 5 秒。慢渲染页面少拿到旧结构，
+  持续动画也不会让动作失败。
+- **空视口不再丢失屏外提示**：当可见元素恰好为零、但 Client 报告还有屏外元素时，保留
+  `scope=viewport` 与「另有 N 个元素在视口外」，不再误降级成空白的 `document-fallback`。
+
 ## 0.2.0 — 2026-11-03
 
 ### 变更

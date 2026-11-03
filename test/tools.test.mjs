@@ -31,8 +31,8 @@ function makeDeps(frames, calls) {
   let index = 0
   const bridge = {
     knownUrl: () => undefined,
-    sendCommand: async (sessionId, op, args) => {
-      if (calls !== undefined) calls.push({ sessionId, op, args })
+    sendCommand: async (sessionId, op, args, timeoutMs) => {
+      if (calls !== undefined) calls.push({ sessionId, op, args, timeoutMs })
       const frame = frames[Math.min(index, frames.length - 1)]
       index += 1
       // 模拟 client：快照的 scope 跟随下发的 args.scope（默认 viewport）。
@@ -73,11 +73,11 @@ const frameA = {
   ],
 }
 
-test('15 个工具都注册且 schema 只用受支持关键字', () => {
+test('16 个工具都注册且 schema 只用受支持关键字', () => {
   const tools = buildBrowserTools(makeDeps([frameA]))
-  assert.equal(tools.length, 15)
+  assert.equal(tools.length, 16)
   const names = tools.map((t) => t.name)
-  for (const required of ['browser_open', 'browser_snapshot', 'browser_click', 'browser_nav', 'browser_close']) {
+  for (const required of ['browser_open', 'browser_snapshot', 'browser_wait', 'browser_click', 'browser_nav', 'browser_close']) {
     assert.ok(names.includes(required), `缺少 ${required}`)
   }
   const allowed = new Set(['type', 'oneOf', 'properties', 'required', 'additionalProperties', 'items', 'enum', 'const', 'description', 'title', 'default', 'examples'])
@@ -112,6 +112,56 @@ test('browser_open 默认 scope:viewport，可显式 document', async () => {
   calls.length = 0
   await run(tools.browser_open, { url: 'https://e.com/', scope: 'document' }, 's-open-doc')
   assert.deepEqual(calls[0].args, { url: 'https://e.com/', scope: 'document' })
+})
+
+test('browser_wait 恰好一个条件，默认等待 10 秒并回视口', async () => {
+  const calls = []
+  const tools = toolset(makeDeps([frameA], calls))
+  const text = await run(tools.browser_wait, { text: '提交成功' }, 's-wait-text')
+  assert.deepEqual(calls[0].args, {
+    snapshot: true, scope: 'viewport', text: '提交成功', timeoutMs: 10000, state: 'visible',
+  })
+  assert.equal(calls[0].timeoutMs, 15000)
+  assert.ok(text.includes('wait text "提交成功" → matched'), text)
+  assert.ok(text.includes('@e1'), text)
+
+  calls.length = 0
+  await run(tools.browser_wait, { selector: '#loading', state: 'hidden', timeoutMs: 5000, snapshot: false }, 's-wait-hidden')
+  assert.deepEqual(calls[0].args, { snapshot: false, selector: '#loading', timeoutMs: 5000, state: 'hidden' })
+  assert.equal(calls[0].timeoutMs, 10000)
+
+  calls.length = 0
+  await run(tools.browser_wait, { url: '/result' }, 's-wait-url')
+  assert.deepEqual(calls[0].args, { snapshot: true, scope: 'viewport', url: '/result', timeoutMs: 10000 })
+
+  calls.length = 0
+  const invalid = await run(tools.browser_wait, { text: '完成', selector: '#done' }, 's-wait-invalid')
+  assert.ok(invalid.includes('BAD_ARGUMENTS'), invalid)
+  assert.equal(calls.length, 0)
+})
+
+test('NO_REF 失败自动补现场视口；snapshot:false 时不补拍', async () => {
+  const calls = []
+  const deps = makeDeps([frameA], calls)
+  const snapshotCommand = deps.bridge.sendCommand
+  deps.bridge.sendCommand = async (sessionId, op, args, timeoutMs) => {
+    if (op === 'click') {
+      calls.push({ sessionId, op, args, timeoutMs })
+      throw new BridgeError('NO_REF', '元素 @e9 已失效', 'c-1')
+    }
+    return snapshotCommand(sessionId, op, args, timeoutMs)
+  }
+  const tools = toolset(deps)
+  const text = await run(tools.browser_click, { ref: '@e9' }, 's-failure-scene')
+  assert.ok(text.includes('browser_click failed: NO_REF'), text)
+  assert.ok(text.includes('@e1 link "首页"'), text)
+  assert.deepEqual(calls.map((call) => call.op), ['click', 'snapshot'])
+
+  calls.length = 0
+  const withoutSnapshot = await run(tools.browser_click, { ref: '@e9', snapshot: false }, 's-failure-no-scene')
+  assert.ok(withoutSnapshot.includes('NO_REF'), withoutSnapshot)
+  assert.ok(!withoutSnapshot.includes('@e1'), withoutSnapshot)
+  assert.deepEqual(calls.map((call) => call.op), ['click'])
 })
 
 test('动作类工具默认 {snapshot:true, scope:viewport}，snapshot:false 被尊重', async () => {
