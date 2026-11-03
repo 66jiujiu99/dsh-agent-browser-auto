@@ -1118,6 +1118,11 @@ window.__ModuleLoader__.load({
         this.id = 'p' + (pageSeq += 1);
         this.element = null;
         this.lease = null;
+        this.partition = null;
+        this.attaching = null;
+        this.attachError = null;
+        this.restoreUrl = null;
+        this.mountToken = 0;
         this.ready = false;
         this.url = 'about:blank';
         this.title = '';
@@ -1134,64 +1139,77 @@ window.__ModuleLoader__.load({
         if (!isDesktop()) throw err('NOT_DESKTOP', '当前不是桌面版，无法创建受控浏览器');
         const reservation = await globalThis.dshDesktop.browser.acquire(WORKSPACE_KEY);
         this.lease = reservation.lease;
+        this.partition = reservation.partition;
+        this.mount(host);
+        return this;
+      }
+
+      /** 用当前 lease 与登录分区创建新的 webview 元素。 */
+      mount(host) {
         const element = document.createElement('webview');
         element.className = 'bh-view';
-        element.setAttribute('name', reservation.lease);
-        element.setAttribute('partition', reservation.partition);
+        element.setAttribute('name', this.lease);
+        element.setAttribute('partition', this.partition);
         element.setAttribute('allowpopups', '');
-        element.setAttribute('src', 'about:blank#' + reservation.lease);
+        element.setAttribute('src', 'about:blank#' + this.lease);
         this.element = element;
+        this.ready = false;
+        this.attachError = null;
 
-        element.addEventListener('dom-ready', () => {
+        const on = (type, listener) => element.addEventListener(type, (event) => {
+          // 重建后忽略旧元素迟发的事件，避免旧 guest 改写新页面的状态。
+          if (this.element === element) listener(event);
+        });
+        on('dom-ready', () => {
           this.ready = true;
           log('info', 'guest dom-ready', { pageId: this.id, url: this.url });
           this.notifyOwner();
           this.exec('install', {}).catch((error) => log('warn', 'install page agent failed', { error }));
         });
-        element.addEventListener('did-start-loading', () => {
+        on('did-start-loading', () => {
           this.loading = true;
           this.notifyOwner();
         });
-        element.addEventListener('did-stop-loading', () => {
+        on('did-stop-loading', () => {
           this.loading = false;
           this.notifyOwner();
         });
-        element.addEventListener('did-navigate', (event) => {
+        on('did-navigate', (event) => {
           this.url = event.url || this.url;
           this.failure = null;
           this.title = safeTitle(element);
           this.notifyOwner();
         });
-        element.addEventListener('did-navigate-in-page', (event) => {
+        on('did-navigate-in-page', (event) => {
           if (event.isMainFrame) {
             this.url = event.url || this.url;
             this.notifyOwner();
           }
         });
-        element.addEventListener('page-title-updated', () => {
+        on('page-title-updated', () => {
           this.title = safeTitle(element);
           this.notifyOwner();
         });
-        element.addEventListener('did-fail-load', (event) => {
+        on('did-fail-load', (event) => {
           if (!event.isMainFrame || event.errorCode === -3) return;
           this.failure = { code: event.errorCode, description: event.errorDescription };
           log('warn', 'guest did-fail-load', { pageId: this.id, code: event.errorCode, description: event.errorDescription, url: event.validatedURL });
           this.notifyOwner();
         });
-        element.addEventListener('console-message', (event) => {
+        on('console-message', (event) => {
           const level = ['debug', 'info', 'warning', 'error'][event.level] || 'info';
           this.consoleEntries.push({ level, text: String(event.message || '').slice(0, 500), line: event.line, url: event.sourceId ? String(event.sourceId).slice(0, 200) : undefined });
           if (this.consoleEntries.length > 300) this.consoleEntries.shift();
         });
         // 只处理 embedder 实际收到的 F12；不向 guest 注入快捷键脚本。
         // Electron 是否把 guest 焦点的键盘事件转发到 webview 元素取决于运行环境。
-        element.addEventListener('keydown', (event) => {
+        on('keydown', (event) => {
           if (event.key !== 'F12') return;
           event.preventDefault();
           event.stopPropagation();
           if (this.owner) this.owner.openDevTools(this.id);
         });
-        element.addEventListener('render-process-gone', () => {
+        on('render-process-gone', () => {
           this.loading = false;
           this.failure = { code: 'render-process-gone', description: '页面渲染进程退出' };
           log('error', 'guest render-process-gone', { pageId: this.id });
@@ -1203,28 +1221,80 @@ window.__ModuleLoader__.load({
         return this;
       }
 
-      /** 把 guest 挂到可见容器（同一元素只能挂一处）。 */
+      /** 重挂载时重新申请 lease 并重建元素；partition 仍由工作区键保持稳定。 */
       attach(host) {
-        if (!this.element) return;
-        if (this.element.parentElement !== host) {
-          host.appendChild(this.element);
+        if (!host || this.disposed) return Promise.resolve();
+        if (this.element && this.element.parentElement === host && this.element.isConnected) {
+          this.host = host;
+          return Promise.resolve();
         }
+        if (this.attaching && this.host === host) return this.attaching;
+
+        const token = ++this.mountToken;
+        const previous = this.element;
+        const previousLease = this.lease;
+        const restoreUrl = this.url;
+        if (previous && previous.parentElement) previous.parentElement.removeChild(previous);
+        this.element = null;
+        this.lease = null;
+        this.ready = false;
+        this.attachError = null;
         this.host = host;
+
+        const task = (async () => {
+          if (previousLease) {
+            try { await globalThis.dshDesktop.browser.release(previousLease); } catch (error) { log('warn', 'release detached lease failed', { error }); }
+          }
+          const reservation = await globalThis.dshDesktop.browser.acquire(WORKSPACE_KEY);
+          if (this.disposed || token !== this.mountToken || this.host !== host) {
+            try { await globalThis.dshDesktop.browser.release(reservation.lease); } catch { /* 忽略过期挂载的释放失败 */ }
+            return;
+          }
+          this.lease = reservation.lease;
+          this.partition = reservation.partition;
+          this.mount(host);
+          this.restoreUrl = restoreUrl && !String(restoreUrl).startsWith('about:blank') ? restoreUrl : null;
+          log('info', 'guest recreated for reattach', { pageId: this.id, url: this.url });
+        })().catch((error) => {
+          if (token === this.mountToken) this.attachError = String(error && error.message ? error.message : error);
+          log('warn', 'reattach guest failed', { pageId: this.id, error });
+        }).finally(() => {
+          if (this.attaching === task) this.attaching = null;
+          this.notifyOwner();
+        });
+        this.attaching = task;
+        return task;
       }
 
       detach() {
+        this.mountToken += 1;
+        this.ready = false;
         if (this.element && this.element.parentElement) this.element.parentElement.removeChild(this.element);
         this.host = null;
       }
 
       async waitReady(timeoutMs) {
-        const ok = await waitFor(() => (this.ready ? true : undefined), timeoutMs || 8000, 50);
-        if (!ok) throw err('TIMEOUT', 'guest 未在 ' + (timeoutMs || 8000) + 'ms 内就绪');
+        if (this.attaching) await this.attaching;
+        if (this.attachError) throw err('INTERNAL', 'guest 重挂载失败：' + this.attachError);
+        const budget = timeoutMs || 8000;
+        const ok = await waitFor(
+          () => (this.ready && this.element && this.element.isConnected ? true : undefined),
+          budget,
+          50,
+        );
+        if (!ok) throw err('TIMEOUT', 'guest 未在 ' + budget + 'ms 内完成挂载和就绪');
+        if (this.restoreUrl) {
+          const url = this.restoreUrl;
+          this.restoreUrl = null;
+          await this.navigate(url, 15000);
+        }
       }
 
       /** 在 guest 主世界执行页面脚本。 */
       async exec(op, args) {
         if (!this.element) throw err('NO_PAGE', '页面已被销毁');
+        if (this.host && (this.element.parentElement !== this.host || !this.element.isConnected)) await this.attach(this.host);
+        await this.waitReady(10000);
         const code = '(' + pageAgent.toString() + ')(' + JSON.stringify(op) + ',' + JSON.stringify(args || {}) + ')';
         const value = await this.element.executeJavaScript(code, true);
         return value;
@@ -1445,7 +1515,8 @@ window.__ModuleLoader__.load({
       async ensurePage() {
         let active = this.active;
         if (active) {
-          if (this.host && active.element && active.element.parentElement !== this.host) active.attach(this.host);
+          if (this.host && (!active.element || active.element.parentElement !== this.host || !active.element.isConnected)) await active.attach(this.host);
+          await active.waitReady(10000);
           return active;
         }
         active = new Page(this.sessionId, this);
@@ -2141,7 +2212,7 @@ window.__ModuleLoader__.load({
       const sidebarRight = pluginCtx && pluginCtx.sidebarRight;
       if (!sidebarRight) throw err('NO_CLIENT', '右侧栏服务不可用');
       const controller = controllerFor(sessionId, true);
-      if (controller.host) return controller;
+      if (controller.host && controller.host.isConnected) return controller;
       const mounted = currentSessionId();
       if (mounted && mounted !== sessionId) {
         throw err('NO_CLIENT', '目标会话不在前台：请在 PC 上切到该会话后再试');
@@ -2151,7 +2222,7 @@ window.__ModuleLoader__.load({
       } catch (error) {
         throw err('NO_CLIENT', '无法打开浏览器标签页：' + String(error && error.message ? error.message : error));
       }
-      const attached = await waitFor(() => (controller.host ? true : undefined), 6000, 60);
+      const attached = await waitFor(() => (controller.host && controller.host.isConnected ? true : undefined), 6000, 60);
       if (!attached) throw err('NO_CLIENT', '浏览器标签页没有挂载（可能右侧栏被关闭）');
       return controller;
     }
