@@ -1112,8 +1112,9 @@ window.__ModuleLoader__.load({
 
     /** 一个 webview guest + 它的页面状态。 */
     class Page {
-      constructor(sessionId) {
+      constructor(sessionId, owner) {
         this.sessionId = sessionId;
+        this.owner = owner || null;
         this.id = 'p' + (pageSeq += 1);
         this.element = null;
         this.lease = null;
@@ -1123,6 +1124,10 @@ window.__ModuleLoader__.load({
         this.failure = null;
         this.consoleEntries = [];
         this.disposed = false;
+      }
+
+      notifyOwner() {
+        if (this.owner) this.owner.notify();
       }
 
       async create(host) {
@@ -1140,29 +1145,38 @@ window.__ModuleLoader__.load({
         element.addEventListener('dom-ready', () => {
           this.ready = true;
           log('info', 'guest dom-ready', { pageId: this.id, url: this.url });
+          this.notifyOwner();
           this.exec('install', {}).catch((error) => log('warn', 'install page agent failed', { error }));
         });
         element.addEventListener('did-start-loading', () => {
           this.loading = true;
+          this.notifyOwner();
         });
         element.addEventListener('did-stop-loading', () => {
           this.loading = false;
+          this.notifyOwner();
         });
         element.addEventListener('did-navigate', (event) => {
           this.url = event.url || this.url;
           this.failure = null;
           this.title = safeTitle(element);
+          this.notifyOwner();
         });
         element.addEventListener('did-navigate-in-page', (event) => {
-          if (event.isMainFrame) this.url = event.url || this.url;
+          if (event.isMainFrame) {
+            this.url = event.url || this.url;
+            this.notifyOwner();
+          }
         });
         element.addEventListener('page-title-updated', () => {
           this.title = safeTitle(element);
+          this.notifyOwner();
         });
         element.addEventListener('did-fail-load', (event) => {
           if (!event.isMainFrame || event.errorCode === -3) return;
           this.failure = { code: event.errorCode, description: event.errorDescription };
           log('warn', 'guest did-fail-load', { pageId: this.id, code: event.errorCode, description: event.errorDescription, url: event.validatedURL });
+          this.notifyOwner();
         });
         element.addEventListener('console-message', (event) => {
           const level = ['debug', 'info', 'warning', 'error'][event.level] || 'info';
@@ -1170,8 +1184,10 @@ window.__ModuleLoader__.load({
           if (this.consoleEntries.length > 300) this.consoleEntries.shift();
         });
         element.addEventListener('render-process-gone', () => {
+          this.loading = false;
           this.failure = { code: 'render-process-gone', description: '页面渲染进程退出' };
           log('error', 'guest render-process-gone', { pageId: this.id });
+          this.notifyOwner();
         });
 
         if (host) host.appendChild(element);
@@ -1267,6 +1283,8 @@ window.__ModuleLoader__.load({
       async dispose() {
         if (this.disposed) return;
         this.disposed = true;
+        this.owner = null;
+        this.host = null;
         const element = this.element;
         this.element = null;
         try { if (element && element.parentElement) element.parentElement.removeChild(element); } catch { /* 忽略 */ }
@@ -1280,6 +1298,15 @@ window.__ModuleLoader__.load({
 
     function safeTitle(element) {
       try { return element.getTitle() || ''; } catch { return ''; }
+    }
+
+    function safeHistoryCapability(element, method) {
+      try {
+        if (!element || typeof element[method] !== 'function') return null;
+        return Boolean(element[method]());
+      } catch {
+        return null;
+      }
     }
 
     // ────────────────────────────── 会话控制器 ──────────────────────────────
@@ -1300,7 +1327,16 @@ window.__ModuleLoader__.load({
       snapshot() {
         return {
           version: this.version,
-          pages: this.pages.filter((page) => !page.disposed).map((page) => ({ id: page.id, url: page.url, title: page.label, active: page.id === this.activeId })),
+          pages: this.pages.filter((page) => !page.disposed).map((page) => ({
+            id: page.id,
+            url: page.url,
+            title: page.label,
+            active: page.id === this.activeId,
+            loading: page.loading === true,
+            failure: page.failure ? { code: page.failure.code, description: String(page.failure.description || '') } : null,
+            canGoBack: safeHistoryCapability(page.element, 'canGoBack'),
+            canGoForward: safeHistoryCapability(page.element, 'canGoForward'),
+          })),
           activeId: this.activeId,
           busy: this.busy > 0,
           lastError: this.lastError,
@@ -1343,9 +1379,14 @@ window.__ModuleLoader__.load({
           if (this.host && active.element && active.element.parentElement !== this.host) active.attach(this.host);
           return active;
         }
-        active = new Page(this.sessionId);
-        await active.create(this.host);
-        await active.waitReady(10000);
+        active = new Page(this.sessionId, this);
+        try {
+          await active.create(this.host);
+          await active.waitReady(10000);
+        } catch (error) {
+          await active.dispose().catch((disposeError) => log('warn', 'dispose failed page failed', { error: disposeError }));
+          throw error;
+        }
         this.pages.push(active);
         this.activeId = active.id;
         this.notify();
@@ -1353,11 +1394,21 @@ window.__ModuleLoader__.load({
       }
 
       async newPage() {
-        const page = new Page(this.sessionId);
-        await page.create(this.host);
-        await page.waitReady(10000);
+        const previous = this.active;
+        for (const other of this.pages) other.detach();
+        const page = new Page(this.sessionId, this);
+        try {
+          await page.create(this.host);
+          await page.waitReady(10000);
+        } catch (error) {
+          await page.dispose().catch((disposeError) => log('warn', 'dispose failed page failed', { error: disposeError }));
+          if (previous && !previous.disposed && this.host) previous.attach(this.host);
+          throw error;
+        }
         this.pages.push(page);
         this.activeId = page.id;
+        for (const other of this.pages) if (other !== page) other.detach();
+        if (this.host) page.attach(this.host);
         this.notify();
         return page;
       }
@@ -2098,30 +2149,74 @@ window.__ModuleLoader__.load({
 
     const STYLE = `
       .bh-root { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); }
-      .bh-bar { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-bottom: .5px solid var(--dsw-alias-border-l3); flex: none; }
+      .bh-bar { display: flex; align-items: center; gap: 3px; padding: 5px 6px; border-bottom: .5px solid var(--dsw-alias-border-l3); flex: none; min-width: 0; }
       .bh-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dsw-alias-label-quaternary); flex: none; }
       .bh-dot.busy { background: var(--dsw-alias-state-business-primary); }
       .bh-dot.error { background: var(--dsw-alias-state-error-primary); }
-      .bh-url { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-secondary); font: var(--dsw-font-xxs-12); }
-      .bh-chip { border: .5px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-secondary); border-radius: var(--dsw-radius-sm); font: var(--dsw-font-xxs-12); padding: 2px 8px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
-      .bh-chip.active { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-state-business-primary); }
-      .bh-tabs { display: flex; gap: 4px; overflow-x: auto; flex: none; padding: 4px 8px; scrollbar-width: none; }
+      .bh-page-loading { flex: none; color: var(--dsw-alias-state-business-primary); font: var(--dsw-font-xxs-11); white-space: nowrap; }
+      .bh-icon-button { flex: 0 0 24px; width: 24px; padding: 2px 0; border: .5px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-secondary); font: var(--dsw-font-xs-13); cursor: pointer; }
+      .bh-icon-button:disabled, .bh-tab-close:disabled { opacity: .45; cursor: default; }
+      .bh-address { flex: 1; min-width: 60px; width: 100%; border: .5px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); border-radius: var(--dsw-radius-sm); font: var(--dsw-font-xxs-12); padding: 3px 7px; outline: none; }
+      .bh-address:focus { border-color: var(--dsw-alias-state-business-primary); }
+      .bh-tabs { display: flex; gap: 4px; overflow-x: auto; flex: none; padding: 4px 6px; scrollbar-width: none; border-bottom: .5px solid var(--dsw-alias-border-l3); }
       .bh-tabs::-webkit-scrollbar { display: none; }
+      .bh-tab { display: flex; align-items: stretch; flex: 0 1 160px; min-width: 72px; max-width: 180px; overflow: hidden; border: .5px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1); }
+      .bh-tab.active { border-color: var(--dsw-alias-state-business-primary); }
+      .bh-tab-main { flex: 1; min-width: 0; padding: 2px 6px; border: 0; background: transparent; color: var(--dsw-alias-label-secondary); font: var(--dsw-font-xxs-12); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; cursor: pointer; }
+      .bh-tab.active .bh-tab-main { color: var(--dsw-alias-label-primary); }
+      .bh-tab-close { flex: 0 0 22px; padding: 0; border: 0; background: transparent; color: var(--dsw-alias-label-tertiary); font: var(--dsw-font-xs-13); cursor: pointer; }
       .bh-viewport { flex: auto; min-height: 0; min-width: 0; position: relative; display: flex; }
+      .bh-guest-host { flex: auto; min-height: 0; min-width: 0; display: flex; }
       .bh-view { flex: auto; width: 100%; height: 100%; border: 0; display: flex; background: var(--dsw-alias-bg-base); }
+      .bh-empty-overlay { position: absolute; inset: 0; display: flex; pointer-events: none; background: var(--dsw-alias-bg-base); }
       .bh-empty { margin: auto; padding: 24px; text-align: center; color: var(--dsw-alias-label-tertiary); font: var(--dsw-font-xs-13); }
-      .bh-error { flex: none; padding: 6px 12px; color: var(--dsw-alias-state-error-primary); font: var(--dsw-font-xxs-11); background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent); }
+      .bh-error { flex: none; padding: 6px 10px; color: var(--dsw-alias-state-error-primary); font: var(--dsw-font-xxs-11); background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent); overflow-wrap: anywhere; }
+      .bh-page-failure { display: flex; align-items: flex-start; gap: 8px; }
+      .bh-error-text { flex: 1; min-width: 0; }
+      .bh-retry { flex: none; padding: 1px 7px; border: .5px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font: var(--dsw-font-xxs-11); cursor: pointer; }
     `;
 
-    const KICKOFF = '点工具条的「打开」或直接让 Agent 使用 browser_open 打开一个网址。';
+    const KICKOFF = '在地址栏输入网址后按 Enter，或直接让 Agent 使用 browser_open。';
+
+    function normalizeUiUrl(input) {
+      const raw = String(input || '').trim();
+      if (!raw) throw err('BAD_URL', '请输入网址');
+      // example.com:8080 / localhost:3000 是主机加端口，不是 URL scheme。
+      const hostWithPort = /^(?:localhost|127(?:\.\d{1,3}){3}|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?):\d+(?:[/?#]|$)/i.test(raw);
+      const hasScheme = /^[a-z][a-z\d+.-]*:/i.test(raw) && !hostWithPort;
+      const candidate = hasScheme ? raw : 'https://' + raw.replace(/^\/\//, '');
+      let parsed;
+      try {
+        parsed = new URL(candidate);
+      } catch {
+        throw err('BAD_URL', '网址格式无效，请输入有效的 http:// 或 https:// 地址');
+      }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw err('BAD_URL', '地址栏仅支持 http:// 或 https:// 网址');
+      }
+      if (!parsed.hostname) throw err('BAD_URL', '网址缺少有效主机名');
+      if (!hasScheme) {
+        const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+        if (hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === '127.0.0.1' || hostname === '::1') {
+          parsed.protocol = 'http:';
+        }
+      }
+      return parsed.href;
+    }
 
     function HandsBody(props) {
       const sessionId = props.sessionId;
       const [controller] = React.useState(() => controllerFor(sessionId, true));
       const [state, setState] = React.useState(() => controller.snapshot());
       const hostRef = React.useRef(null);
-      const [showOpen, setShowOpen] = React.useState(false);
+      const addressRef = React.useRef(null);
+      const draftOwner = React.useRef(null);
+      const tabActionBusy = React.useRef(false);
       const [draft, setDraft] = React.useState('');
+      const [addressFocused, setAddressFocused] = React.useState(false);
+      const [tabBusy, setTabBusy] = React.useState(false);
+      const activePage = state.pages.find((page) => page.active) || null;
+      const activeUrl = activePage ? activePage.url : '';
 
       React.useEffect(() => controller.subscribe(() => setState(controller.snapshot())), [controller]);
 
@@ -2134,15 +2229,84 @@ window.__ModuleLoader__.load({
         };
       }, [controller]);
 
+      React.useEffect(() => {
+        if (draftOwner.current !== state.activeId || !addressFocused) {
+          draftOwner.current = state.activeId;
+          setDraft(activeUrl);
+        }
+      }, [state.activeId, activeUrl, addressFocused]);
+
+      const reportError = (error) => {
+        controller.lastError = { code: error.bhCode || 'INTERNAL', message: String(error.message || error) };
+        controller.notify();
+        log('warn', 'browser UI action failed', { error });
+      };
+
       const openUrl = () => {
-        const value = draft.trim();
-        if (!value) return;
-        setShowOpen(false);
-        setDraft('');
-        runCommand({ id: 'ui-local', op: 'open', sessionId, args: { url: value } }).catch((error) => {
-          controller.lastError = { code: error.bhCode || 'INTERNAL', message: String(error.message || error) };
+        if (!draft.trim() || controller.busy > 0 || tabActionBusy.current) return;
+        let value;
+        try {
+          value = normalizeUiUrl(draft);
+        } catch (error) {
+          reportError(error);
+          return;
+        }
+        const hasPage = !!controller.active;
+        runCommand({
+          id: 'ui-local',
+          op: hasPage ? 'nav' : 'open',
+          sessionId,
+          args: hasPage ? { action: 'goto', url: value, snapshot: false } : { url: value, snapshot: false },
+        }).catch(reportError);
+      };
+
+      const navigate = (action) => {
+        if (!controller.active || controller.busy > 0 || tabActionBusy.current) return;
+        runCommand({ id: 'ui-local', op: 'nav', sessionId, args: { action, snapshot: false } }).catch(reportError);
+      };
+
+      const createTab = async () => {
+        if (controller.busy > 0 || tabActionBusy.current) return;
+        tabActionBusy.current = true;
+        setTabBusy(true);
+        try {
+          await controller.newPage();
+          controller.lastError = null;
           controller.notify();
-        });
+        } catch (error) {
+          reportError(error);
+        } finally {
+          tabActionBusy.current = false;
+          setTabBusy(false);
+        }
+      };
+
+      const closeTab = async (id) => {
+        if (controller.busy > 0 || tabActionBusy.current) return;
+        tabActionBusy.current = true;
+        setTabBusy(true);
+        try {
+          await controller.closePage(id);
+          controller.lastError = null;
+          controller.notify();
+        } catch (error) {
+          reportError(error);
+        } finally {
+          tabActionBusy.current = false;
+          setTabBusy(false);
+        }
+      };
+
+      const switchTab = (id) => {
+        try {
+          controller.switchTo(id);
+          if (controller.lastError) {
+            controller.lastError = null;
+            controller.notify();
+          }
+        } catch (error) {
+          reportError(error);
+        }
       };
 
       if (!isDesktop()) {
@@ -2153,40 +2317,126 @@ window.__ModuleLoader__.load({
         return h('div', { className: 'bh-root' }, h('style', null, STYLE), h('div', { className: 'bh-empty' }, '没有会话。'));
       }
 
+      const commandDisabled = state.busy || tabBusy;
       return h('div', { className: 'bh-root' },
         h('style', null, STYLE),
         h('div', { className: 'bh-bar' },
-          h('div', { className: 'bh-dot' + (state.lastError ? ' error' : state.busy ? ' busy' : ''), title: state.busy ? 'Agent 正在操作' : '空闲' }),
-          h('div', { className: 'bh-url', title: state.pages.find((page) => page.active)?.url || '' },
-            state.pages.find((page) => page.active)?.url || (showOpen ? '' : KICKOFF)),
-          showOpen
-            ? h('input', {
-              className: 'bh-chip',
-              autoFocus: true,
-              value: draft,
-              placeholder: '输入 https:// 地址后回车',
-              onChange: (event) => setDraft(event.currentTarget.value),
-              onKeyDown: (event) => {
-                if (event.key === 'Enter') { event.preventDefault(); openUrl(); }
-                if (event.key === 'Escape') setShowOpen(false);
-              },
-            })
-            : h('button', { className: 'bh-chip', type: 'button', onClick: () => setShowOpen(true) }, '打开'),
+          h('div', {
+            className: 'bh-dot' + (state.lastError ? ' error' : state.busy ? ' busy' : ''),
+            title: state.busy ? 'Agent 正在操作' : 'Agent 空闲',
+            'aria-label': state.busy ? 'Agent 正在操作' : 'Agent 空闲',
+          }),
+          activePage && activePage.loading
+            ? h('span', { className: 'bh-page-loading', title: '页面正在加载', 'aria-label': '页面正在加载' }, '加载中')
+            : null,
+          h('button', {
+            className: 'bh-icon-button',
+            type: 'button',
+            title: '后退',
+            'aria-label': '后退',
+            disabled: commandDisabled || !activePage || activePage.canGoBack !== true,
+            onClick: () => navigate('back'),
+          }, '←'),
+          h('button', {
+            className: 'bh-icon-button',
+            type: 'button',
+            title: '前进',
+            'aria-label': '前进',
+            disabled: commandDisabled || !activePage || activePage.canGoForward !== true,
+            onClick: () => navigate('forward'),
+          }, '→'),
+          h('button', {
+            className: 'bh-icon-button',
+            type: 'button',
+            title: '刷新',
+            'aria-label': '刷新',
+            disabled: commandDisabled || !activePage,
+            onClick: () => navigate('reload'),
+          }, '↻'),
+          h('input', {
+            ref: addressRef,
+            className: 'bh-address',
+            value: draft,
+            placeholder: '输入 https:// 地址后回车',
+            title: 'Enter 打开地址；Escape 恢复当前地址',
+            'aria-label': '地址栏',
+            spellCheck: false,
+            autoCapitalize: 'off',
+            autoCorrect: 'off',
+            onFocus: () => {
+              draftOwner.current = state.activeId;
+              setAddressFocused(true);
+            },
+            onBlur: () => setAddressFocused(false),
+            onChange: (event) => {
+              draftOwner.current = state.activeId;
+              setDraft(event.currentTarget.value);
+            },
+            onKeyDown: (event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                event.stopPropagation();
+                openUrl();
+                event.currentTarget.blur();
+              } else if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                draftOwner.current = state.activeId;
+                setDraft(activeUrl);
+              }
+            },
+          }),
+          h('button', {
+            className: 'bh-icon-button',
+            type: 'button',
+            title: '新建标签',
+            'aria-label': '新建标签',
+            disabled: commandDisabled,
+            onClick: createTab,
+          }, '+'),
         ),
-        state.pages.length > 1
-          ? h('div', { className: 'bh-tabs' }, state.pages.map((page) =>
+        state.pages.length > 0
+          ? h('div', { className: 'bh-tabs', role: 'tablist', 'aria-label': '浏览器标签' }, state.pages.map((page) =>
+            h('div', { key: page.id, className: 'bh-tab' + (page.active ? ' active' : '') },
+              h('button', {
+                type: 'button',
+                role: 'tab',
+                'aria-selected': page.active,
+                className: 'bh-tab-main',
+                title: (page.title || '页面') + '\n' + page.url,
+                onClick: () => switchTab(page.id),
+              }, page.title || page.url || '页面'),
+              h('button', {
+                type: 'button',
+                className: 'bh-tab-close',
+                title: '关闭标签',
+                'aria-label': '关闭标签：' + (page.title || page.url || '页面'),
+                disabled: commandDisabled,
+                onClick: (event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  closeTab(page.id);
+                },
+              }, '×'))))
+          : null,
+        activePage && activePage.failure
+          ? h('div', { className: 'bh-error bh-page-failure' },
+            h('span', { className: 'bh-error-text' },
+              '页面加载失败：' + (activePage.failure.description || '未知错误')
+              + '（' + String(activePage.failure.code === undefined ? '未知代码' : activePage.failure.code) + '）'),
             h('button', {
-              key: page.id,
+              className: 'bh-retry',
               type: 'button',
-              className: 'bh-chip' + (page.active ? ' active' : ''),
-              title: page.url,
-              onClick: () => {
-                try { controller.switchTo(page.id); } catch (error) { log('warn', 'switch tab failed', { error }); }
-              },
-            }, (page.title || page.url || '页面').slice(0, 24))))
+              title: '重新加载当前页面',
+              'aria-label': '重试加载当前页面',
+              disabled: commandDisabled,
+              onClick: () => navigate('reload'),
+            }, '重试'))
           : null,
         state.lastError ? h('div', { className: 'bh-error' }, state.lastError.code + ' — ' + state.lastError.message) : null,
-        h('div', { className: 'bh-viewport', ref: hostRef }),
+        h('div', { className: 'bh-viewport' },
+          h('div', { className: 'bh-guest-host', ref: hostRef }),
+          state.pages.length === 0 ? h('div', { className: 'bh-empty-overlay' }, h('div', { className: 'bh-empty' }, KICKOFF)) : null),
       );
     }
 

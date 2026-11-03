@@ -118,6 +118,7 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 | `ping` | `{}` | `{pong:true, pageCount:number}` |
 
 补充约定：
+- `tabs` 空态合法：没有标签时返回 `tabs:[]`、`activeId:null`。
 - `snapshot` 默认 `true`（除非显式 `false`），即动作/等待后回一张新快照；`dialog` 不附快照。
 - `select` 的 `value / label / index` 必须恰好一个，`index` 为零基；支持原生 `<select>` 及常见
   `role=option/menuitem` 自定义下拉，返回 `selected` 与视口快照。

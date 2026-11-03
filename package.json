@@ -1,6 +1,6 @@
 {
   "name": "dsh-agent-browser-auto",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "description": "DeepSeek Harness 桌面版的「浏览器眼睛与手」：用 browser_* 工具看见并操作右侧边栏里一个用户可见的浏览器页面（19 个工具，含选择、上传、对话框预置、条件等待与 CDP 深度模式）。",

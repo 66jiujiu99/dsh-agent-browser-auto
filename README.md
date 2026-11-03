@@ -2,12 +2,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-0.2.1--rc.2-6f42c1.svg)](#兼容性)
-[![Tests](https://img.shields.io/badge/tests-58%2F58%20pass-brightgreen.svg)](#验收状态2026-11-03-实测)
+[![Tests](https://img.shields.io/badge/tests-59%2F59%20pass-brightgreen.svg)](#验收状态2026-11-03-实测)
 
 给 DSH 桌面版装上「看得见的手」：模型用 `browser_*` 工具**看见并操作**右侧边栏里一个**用户可见**的浏览器页面。
 页面是本插件自己向主进程申请 lease 后创建的 Electron `<webview>`，不碰官方「浏览器」tab 的 DOM（合规、不随上游升级碎裂）。
 
-- 版本：0.4.0 · 目标：DSH 桌面版 0.2.1-rc.2（Electron 44.7.0）
+- 版本：0.5.0 · 目标：DSH 桌面版 0.2.1-rc.2（Electron 44.7.0）
 - 契约：`PROTOCOL.md`（Host ⇄ Client 的唯一协议，改字段两边一起改）
 
 **为什么不是 Playwright / Puppeteer**：那两个库会自己启动一个**独立的无头浏览器**——它看不见、也点不了
@@ -26,6 +26,13 @@ Node 边车进程。本插件复用的是**用户眼前那个真实页面**，�
    └─ <webview>（自建 guest，sandbox、无 Node、无 preload）
         └─ executeJavaScript（快照/定位）+ sendInputEvent（真实输入）+ capturePage（截图）
 ```
+
+### P2 侧边栏
+
+- **常驻可编辑地址栏**：Enter 导航，无页面时直接打开；Escape 还原当前地址。
+- **导航与标签**：后退/前进/刷新；新建、切换、独立关闭标签。
+- **真实状态**：显示真实 loading/failure，失败可重试。
+- **事件驱动同步**：真人点击页面后，地址栏 URL 与标签标题随页面事件同步。
 
 ## 安装
 
@@ -318,18 +325,34 @@ JavaScript，没有任何编译产物或下载执行步骤。这也是本仓库�
 **验证方法（可复现）**
 
 ```bash
-# 单元测试：快照渲染 / 差分 / 工具参数 / CDP 错误映射（58 项）
+# 单元测试：快照渲染 / 差分 / 工具参数 / CDP 错误映射（59 项）
 ELECTRON_RUN_AS_NODE=1 "C:\Data\APP\dsh\DeepSeek Harness.exe" --test test/*.test.mjs
 
 # CDP 集成测试：用真 Chrome（headless + 随机端口）当靶子，不碰你的 DSH
 node C:\Data\deepseek\_probe-cdp\run.mjs
 ```
 
-- 单元测试 **58 / 58 通过**（snapshot 20 · tools 16 · cdp 22）。
+**本地 E2E 夹具（可复现）**
+
+```bash
+node test/fixtures/server.mjs
+```
+
+`test/fixtures/server.mjs` 只服务 `browser-e2e.html`，启动后打印 `127.0.0.1` 随机端口的 URL。
+页面覆盖导航、延迟、原生/自定义下拉、上传、`alert/confirm/prompt`，可用 `browser_open` 打开后逐项验证。
+
+2026-11-03 在 `0.5.0` 真实 Electron webview 中已验证：
+
+- 原生下拉按 label / value / index 选择，自定义下拉按 label 选择；错误候选会返回实际选项。
+- 单文件上传成功，页面只显示浏览器生成的 `C:\fakepath\...`，不显示 Host 原始路径。
+- 预置响应后，`alert` 接受、`confirm` 拒绝、`prompt` 自定义文本均产生预期页面结果。
+- 刷新、后退、前进、加载失败后的恢复导航，以及失效 `@ref` 自动补现场快照。
+
+- 单元测试 **59 / 59 通过**（snapshot 20 · tools 17 · cdp 22）。
 - CDP 集成测试 **17 / 17 通过**：端口文件发现与缓存、`DEEP_UNAVAILABLE` 文案、discover、
   a11y 与 dom 两条读取路线、跨源 iframe（含坐标换算）、各类不可达错误码。
 - 能力边界 **4 / 4 通过**：closed shadow root 可读、canvas 文字不可读（如实记录，不夸大）。
 - 启动器 **6 条路径**全部实测：文件缺失 / 已有实例 / 成功 / 探活失败 / 超时 / 残留端口文件清理。
 
-> 说明：以上数字都来自本机实测，不是设计目标。0.4.0 新增工具的测试数字仅指单元测试，
-> 不声明真实网页 E2E 已通过；未在 macOS / Linux 上验证过，因此不做声明。
+> 说明：以上数字都来自本机实测，不是设计目标。59 / 59 仅指单元测试，不是 59 项真实网页 E2E；
+> 夹具存在不代表所有项目均已实测。未在 macOS / Linux 上验证过，因此不做声明。

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Browser E2E</title>
+  <style>
+    body { max-width: 720px; margin: 24px auto; padding: 0 16px; font: 16px/1.5 sans-serif; }
+    button, select, input { margin: 6px 4px 6px 0; padding: 7px 10px; }
+    [hidden] { display: none !important; }
+    #custom-options { padding: 8px; border: 1px solid #888; list-style: none; }
+    #custom-options li { padding: 6px; cursor: pointer; }
+    #custom-options li:hover { background: #def; }
+    output { display: block; min-height: 24px; margin: 8px 0; white-space: pre-wrap; }
+    section { margin: 20px 0; border-top: 1px solid #ccc; }
+  </style>
+</head>
+<body>
+  <h1 id="page-title">Browser E2E Fixture</h1>
+  <nav aria-label="导航测试">
+    <a id="page-one" href="?page=one">第一页</a>
+    <a id="page-two" href="?page=two">第二页</a>
+    <span id="page-name">home</span>
+  </nav>
+
+  <section aria-label="等待测试">
+    <h2>条件等待</h2>
+    <button id="delayed-button" type="button">延迟出现</button>
+    <button id="delayed-remove" type="button" hidden>延迟消失</button>
+    <div id="delayed-content" hidden>延迟内容已出现</div>
+  </section>
+
+  <section aria-label="选择测试">
+    <h2>下拉选择</h2>
+    <label for="native-select">城市</label>
+    <select id="native-select">
+      <option value="">请选择</option>
+      <option value="chengdu">成都</option>
+      <option value="leshan">乐山</option>
+    </select>
+    <button id="custom-select" type="button" aria-haspopup="listbox" aria-expanded="false">自定义城市</button>
+    <ul id="custom-options" role="listbox" hidden>
+      <li role="option" data-value="chengdu">成都</li>
+      <li role="option" data-value="leshan">乐山</li>
+    </ul>
+  </section>
+
+  <section aria-label="上传测试">
+    <h2>文件上传</h2>
+    <input id="file-input" type="file" multiple>
+  </section>
+
+  <section aria-label="对话框测试">
+    <h2>对话框</h2>
+    <button id="alert-button" type="button">打开 alert</button>
+    <button id="confirm-button" type="button">打开 confirm</button>
+    <button id="prompt-button" type="button">打开 prompt</button>
+  </section>
+
+  <output id="result" aria-live="polite">ready</output>
+  <script>
+    const result = document.querySelector('#result');
+    const show = (value) => { result.textContent = String(value); };
+    const page = new URLSearchParams(location.search).get('page') || 'home';
+    document.querySelector('#page-name').textContent = page;
+    document.title = 'Browser E2E · ' + page;
+
+    document.querySelector('#delayed-button').addEventListener('click', () => {
+      setTimeout(() => {
+        document.querySelector('#delayed-content').hidden = false;
+        document.querySelector('#delayed-remove').hidden = false;
+        show('delayed-visible');
+      }, 700);
+    });
+    document.querySelector('#delayed-remove').addEventListener('click', () => {
+      document.querySelector('#delayed-content').hidden = true;
+      show('delayed-hidden');
+    });
+
+    document.querySelector('#native-select').addEventListener('change', (event) => {
+      const option = event.target.selectedOptions[0];
+      show('native:' + event.target.value + ':' + option.label);
+    });
+    const custom = document.querySelector('#custom-select');
+    const options = document.querySelector('#custom-options');
+    custom.addEventListener('click', () => {
+      options.hidden = !options.hidden;
+      custom.setAttribute('aria-expanded', String(!options.hidden));
+    });
+    options.addEventListener('click', (event) => {
+      const option = event.target.closest('[role=option]');
+      if (!option) return;
+      custom.textContent = option.textContent;
+      options.hidden = true;
+      custom.setAttribute('aria-expanded', 'false');
+      show('custom:' + option.dataset.value + ':' + option.textContent);
+    });
+
+    document.querySelector('#file-input').addEventListener('change', (event) => {
+      show([...event.target.files].map((file) => file.name + ':' + file.size).join(','));
+    });
+    document.querySelector('#alert-button').addEventListener('click', () => {
+      alert('fixture alert');
+      show('alert:closed');
+    });
+    document.querySelector('#confirm-button').addEventListener('click', () => {
+      show('confirm:' + confirm('fixture confirm'));
+    });
+    document.querySelector('#prompt-button').addEventListener('click', () => {
+      show('prompt:' + prompt('fixture prompt', 'default-text'));
+    });
+  </script>
+</body>
+</html>

@@ -316,6 +316,20 @@ test('delta:true 的 stats 按增量文本计，且带 total/计数', async () =
   assert.ok(Number.isFinite(tokens) && tokens < 100, `delta tokens=${tokens}`)
 })
 
+test('browser_tabs 在最后一个标签关闭后允许 activeId=null', async () => {
+  const deps = makeDeps([frameA])
+  deps.bridge.sendCommand = async () => ({
+    clientId: 'c-1',
+    value: { ok: true, tabs: [], activeId: null },
+  })
+  const tools = toolset(deps)
+  assert.deepEqual(tools.browser_tabs.output.schema.properties.activeId.type, ['string', 'null'])
+  const value = await tools.browser_tabs.execute({ action: 'list' }, { agent: { id: 's-tabs-empty' } })
+  assert.equal(value.ok, true)
+  assert.equal(value.activeId, null)
+  assert.deepEqual(value.tabs, [])
+})
+
 test('失败结果渲染成一行可读错误', async () => {
   const deps = makeDeps([frameA])
   deps.bridge.sendCommand = async () => {
