@@ -472,8 +472,173 @@ window.__ModuleLoader__.load({
         return String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit || 200);
       }
 
+      function optionCandidate(el, native, index) {
+        var label = native ? (el.label || el.text || textOf(el)) : textOf(el);
+        var value = '';
+        if (native) value = String(el.value == null ? '' : el.value);
+        else if (el.getAttribute('value') !== null) value = String(el.getAttribute('value'));
+        else if (el.getAttribute('data-value') !== null) value = String(el.getAttribute('data-value'));
+        return { el: el, label: foldText(label, 200), value: value, index: index };
+      }
+
+      function optionNotFound(candidates) {
+        var shown = [];
+        for (var i = 0; i < Math.min(candidates.length, 8); i += 1) {
+          var item = candidates[i];
+          shown.push('[' + item.index + '] ' + JSON.stringify(item.label)
+            + (item.value !== '' ? ' value=' + JSON.stringify(item.value) : ''));
+        }
+        return {
+          ok: false,
+          code: 'OPTION_NOT_FOUND',
+          message: '找不到匹配选项；候选（最多 8 个）: ' + (shown.join(' | ') || '（无）'),
+        };
+      }
+
+      function insideOptionContainer(el) {
+        var node = el;
+        while (node) {
+          if (node.getAttribute) {
+            var role = node.getAttribute('role');
+            if (role === 'listbox' || role === 'menu') return true;
+            var marker = String(node.getAttribute('class') || '') + ' ' + String(node.getAttribute('id') || '');
+            var tokens = marker.toLowerCase().split(/\s+/);
+            for (var i = 0; i < tokens.length; i += 1) {
+              if (/(?:^|[-_])(dropdown|select|select2|ant-select|el-select)(?:[-_]|$)/.test(tokens[i])) return true;
+            }
+          }
+          if (node.parentElement) node = node.parentElement;
+          else {
+            var root = node.getRootNode && node.getRootNode();
+            node = root && root.host ? root.host : null;
+          }
+        }
+        return false;
+      }
+
+      function collectOptionCandidates() {
+        var out = [];
+        function scan(root) {
+          if (!root || !root.querySelectorAll) return;
+          var nodes = root.querySelectorAll('[role=option],[role=menuitem],[role=menuitemradio],[role=menuitemcheckbox],li');
+          for (var i = 0; i < nodes.length; i += 1) {
+            var role = nodes[i].getAttribute('role');
+            var explicitOption = role === 'option' || role === 'menuitem' || role === 'menuitemradio' || role === 'menuitemcheckbox';
+            if (nodes[i].tagName === 'LI' && !explicitOption && !insideOptionContainer(nodes[i])) continue;
+            if (isVisible(nodes[i])) out.push(optionCandidate(nodes[i], false, out.length));
+          }
+          var all = root.querySelectorAll('*');
+          for (var j = 0; j < all.length; j += 1) {
+            if (all[j].shadowRoot) scan(all[j].shadowRoot);
+          }
+          var frames = root.querySelectorAll('iframe,frame');
+          for (var k = 0; k < frames.length; k += 1) {
+            var doc = null;
+            try { doc = frames[k].contentDocument; } catch (e) { doc = null; }
+            if (doc && doc.documentElement) scan(doc);
+          }
+        }
+        scan(document);
+        return out;
+      }
+
+      async function selectCustomOption(found, args, kind) {
+        try {
+          if (typeof found.el.scrollIntoView === 'function') found.el.scrollIntoView({ block: 'center', inline: 'center' });
+          found.el.click();
+        } catch (e) {
+          return { ok: false, code: 'INTERNAL', message: '打开下拉框失败: ' + String(e && e.message ? e.message : e) };
+        }
+        // 给常见 React/Vue 下拉一次渲染窗口；executeJavaScript 会等待这个 Promise。
+        await new Promise(function (resolve) { setTimeout(resolve, 180); });
+        var candidates = collectOptionCandidates();
+        if (candidates.length === 0) {
+          var popup = found.el.getAttribute && found.el.getAttribute('aria-haspopup');
+          if (roleOf(found.el) === 'combobox' || popup === 'listbox' || popup === 'menu' || popup === 'true') {
+            return optionNotFound(candidates);
+          }
+          return { ok: false, code: 'NOT_SELECT', message: '目标不是原生 select，点击后也没有可见下拉选项' };
+        }
+        var picked = null;
+        if (kind === 'index') {
+          if (args.index >= 0 && args.index < candidates.length) picked = candidates[args.index];
+        } else if (kind === 'value') {
+          var wantedValue = String(args.value);
+          for (var i = 0; i < candidates.length; i += 1) {
+            var valueAttr = candidates[i].el.getAttribute('value');
+            var dataValue = candidates[i].el.getAttribute('data-value');
+            if ((valueAttr !== null && String(valueAttr) === wantedValue)
+              || (dataValue !== null && String(dataValue) === wantedValue)) {
+              picked = candidates[i];
+              break;
+            }
+          }
+        } else {
+          var wantedLabel = foldText(args.label, 200);
+          for (var j = 0; j < candidates.length; j += 1) {
+            if (candidates[j].label === wantedLabel) { picked = candidates[j]; break; }
+          }
+          if (!picked) {
+            var partial = [];
+            for (var k = 0; k < candidates.length; k += 1) {
+              if (wantedLabel !== '' && candidates[k].label.indexOf(wantedLabel) >= 0) partial.push(candidates[k]);
+            }
+            if (partial.length === 1) picked = partial[0];
+          }
+        }
+        if (!picked) return optionNotFound(candidates);
+        try {
+          picked.el.click();
+        } catch (e) {
+          return { ok: false, code: 'INTERNAL', message: '点击下拉选项失败: ' + String(e && e.message ? e.message : e) };
+        }
+        return {
+          ok: true,
+          ref: found.ref,
+          selected: { value: picked.value, label: picked.label, index: picked.index },
+          changed: true,
+        };
+      }
+
+      function installDialogHandlers() {
+        if (S.dialogsInstalled) return;
+        S.dialogsInstalled = true;
+        var originals = S.dialogOriginals = {
+          alert: window.alert,
+          confirm: window.confirm,
+          prompt: window.prompt,
+        };
+        function wrap(type, original) {
+          return function (message, defaultValue) {
+            var armed = S.dialogResponse;
+            if (!armed) return original.apply(this, arguments);
+            S.dialogResponse = null;
+            var promptText = null;
+            if (type === 'prompt' && armed.action === 'accept') {
+              promptText = typeof armed.promptText === 'string'
+                ? armed.promptText
+                : String(defaultValue == null ? '' : defaultValue);
+            }
+            S.lastDialog = {
+              type: type,
+              message: String(message == null ? '' : message),
+              action: armed.action,
+              promptText: promptText,
+              at: Date.now(),
+            };
+            if (type === 'alert') return undefined;
+            if (type === 'confirm') return armed.action === 'accept';
+            return armed.action === 'accept' ? promptText : null;
+          };
+        }
+        window.alert = wrap('alert', originals.alert);
+        window.confirm = wrap('confirm', originals.confirm);
+        window.prompt = wrap('prompt', originals.prompt);
+      }
+
       switch (op) {
         case 'install': {
+          installDialogHandlers();
           if (!S.installed) {
             S.installed = true;
             try {
@@ -800,6 +965,131 @@ window.__ModuleLoader__.load({
             });
           }
           return { ok: true, entries: entries };
+        }
+        case 'selectOption': {
+          var foundSelect = resolveLoose(args.ref);
+          if (!foundSelect) return { ok: false, code: 'NO_REF', message: '选择框 ' + args.ref + ' 已失效，请先重新快照' };
+          var selectionKeys = [];
+          if (Object.prototype.hasOwnProperty.call(args, 'value')) selectionKeys.push('value');
+          if (Object.prototype.hasOwnProperty.call(args, 'label')) selectionKeys.push('label');
+          if (Object.prototype.hasOwnProperty.call(args, 'index')) selectionKeys.push('index');
+          if (selectionKeys.length !== 1) {
+            return { ok: false, code: 'BAD_ARG', message: 'select 必须在 value / label / index 中恰好提供一个' };
+          }
+          var selectionKind = selectionKeys[0];
+          if (selectionKind === 'index' && (!Number.isInteger(args.index) || args.index < 0)) {
+            return { ok: false, code: 'BAD_ARG', message: 'select 的 index 必须是零基非负整数' };
+          }
+          if (foundSelect.el.tagName !== 'SELECT') return selectCustomOption(foundSelect, args, selectionKind);
+          var selectEl = foundSelect.el;
+          var nativeCandidates = [];
+          for (var si = 0; si < selectEl.options.length; si += 1) {
+            nativeCandidates.push(optionCandidate(selectEl.options[si], true, si));
+          }
+          var nativePicked = null;
+          if (selectionKind === 'index') {
+            if (args.index < nativeCandidates.length) nativePicked = nativeCandidates[args.index];
+          } else if (selectionKind === 'value') {
+            var nativeValue = String(args.value);
+            for (var sj = 0; sj < nativeCandidates.length; sj += 1) {
+              if (nativeCandidates[sj].value === nativeValue) { nativePicked = nativeCandidates[sj]; break; }
+            }
+          } else {
+            var nativeLabel = foldText(args.label, 200);
+            for (var sk = 0; sk < nativeCandidates.length; sk += 1) {
+              if (nativeCandidates[sk].label === nativeLabel) { nativePicked = nativeCandidates[sk]; break; }
+            }
+          }
+          if (!nativePicked) return optionNotFound(nativeCandidates);
+          function selectSignature() {
+            var selected = [];
+            for (var i = 0; i < selectEl.options.length; i += 1) {
+              if (selectEl.options[i].selected) selected.push(String(i));
+            }
+            return selected.join(',');
+          }
+          var beforeSelection = selectSignature();
+          try {
+            selectEl.selectedIndex = nativePicked.index;
+            var selectView = selectEl.ownerDocument.defaultView || window;
+            selectEl.dispatchEvent(new selectView.Event('input', { bubbles: true }));
+            selectEl.dispatchEvent(new selectView.Event('change', { bubbles: true }));
+          } catch (e) {
+            return { ok: false, code: 'INTERNAL', message: '设置原生 select 失败: ' + String(e && e.message ? e.message : e) };
+          }
+          return {
+            ok: true,
+            ref: foundSelect.ref,
+            selected: { value: nativePicked.value, label: nativePicked.label, index: nativePicked.index },
+            changed: selectSignature() !== beforeSelection,
+          };
+        }
+        case 'uploadFiles': {
+          var foundUpload = resolveLoose(args.ref);
+          if (!foundUpload) return { ok: false, code: 'NO_REF', message: '文件输入框 ' + args.ref + ' 已失效，请先重新快照' };
+          var fileInput = foundUpload.el;
+          if (fileInput.tagName !== 'INPUT' || String(fileInput.type || '').toLowerCase() !== 'file') {
+            return { ok: false, code: 'NOT_FILE_INPUT', message: '目标元素不是 input[type=file]' };
+          }
+          if (!Array.isArray(args.files)) return { ok: false, code: 'UPLOAD_FAILED', message: '上传失败：files 必须是文件数组' };
+          if (!fileInput.multiple && args.files.length > 1) {
+            return { ok: false, code: 'UPLOAD_FAILED', message: '上传失败：该文件输入框不允许多选，只能上传 1 个文件' };
+          }
+          function uploadSignature() {
+            var signature = [];
+            for (var i = 0; fileInput.files && i < fileInput.files.length; i += 1) {
+              var file = fileInput.files[i];
+              signature.push(file.name + ':' + file.size + ':' + file.lastModified);
+            }
+            return signature.join('|');
+          }
+          var beforeUpload = uploadSignature();
+          try {
+            var uploadView = fileInput.ownerDocument.defaultView || window;
+            var transfer = new uploadView.DataTransfer();
+            for (var ui = 0; ui < args.files.length; ui += 1) {
+              var item = args.files[ui];
+              if (!item || typeof item.base64 !== 'string') throw new Error('第 ' + (ui + 1) + ' 个文件缺少 base64 内容');
+              var rawName = String(item.name == null ? 'upload.bin' : item.name);
+              var nameParts = rawName.split(/[\\/]/);
+              var fileName = nameParts[nameParts.length - 1] || 'upload.bin';
+              var binary = uploadView.atob(item.base64);
+              var bytes = new uploadView.Uint8Array(binary.length);
+              for (var uj = 0; uj < binary.length; uj += 1) bytes[uj] = binary.charCodeAt(uj);
+              var file = new uploadView.File([bytes], fileName, {
+                type: typeof item.type === 'string' ? item.type : '',
+                lastModified: Date.now(),
+              });
+              transfer.items.add(file);
+            }
+            fileInput.files = transfer.files;
+            fileInput.dispatchEvent(new uploadView.Event('input', { bubbles: true }));
+            fileInput.dispatchEvent(new uploadView.Event('change', { bubbles: true }));
+          } catch (e) {
+            return { ok: false, code: 'UPLOAD_FAILED', message: '上传失败：' + String(e && e.message ? e.message : e) };
+          }
+          var uploaded = [];
+          for (var uk = 0; fileInput.files && uk < fileInput.files.length; uk += 1) {
+            uploaded.push({ name: String(fileInput.files[uk].name), size: Number(fileInput.files[uk].size) || 0 });
+          }
+          return { ok: true, ref: foundUpload.ref, files: uploaded, changed: uploadSignature() !== beforeUpload };
+        }
+        case 'dialogArm': {
+          installDialogHandlers();
+          var dialogAction = String(args.action || '');
+          if (dialogAction !== 'accept' && dialogAction !== 'dismiss') {
+            return { ok: false, code: 'BAD_ARG', message: 'dialog action 必须是 accept 或 dismiss' };
+          }
+          if (args.promptText !== undefined && typeof args.promptText !== 'string') {
+            return { ok: false, code: 'BAD_ARG', message: 'dialog promptText 必须是字符串' };
+          }
+          var armedDialog = { action: dialogAction };
+          if (typeof args.promptText === 'string') armedDialog.promptText = args.promptText;
+          S.dialogResponse = armedDialog;
+          return { ok: true, armed: armedDialog };
+        }
+        case 'dialogState': {
+          return { ok: true, lastDialog: S.lastDialog || null };
         }
         case 'eval': {
           try {
@@ -1181,6 +1471,20 @@ window.__ModuleLoader__.load({
           const page = await controller.ensurePage();
           return typePage(page, args, lastFull);
         }
+        case 'select': {
+          const page = await controller.ensurePage();
+          return selectPage(page, args);
+        }
+        case 'upload': {
+          const page = await controller.ensurePage();
+          return uploadPage(page, args);
+        }
+        case 'dialog': {
+          const page = await controller.ensurePage();
+          const result = await page.exec('dialogArm', { action: args.action, promptText: args.promptText });
+          if (!result || result.ok !== true) throw err((result && result.code) || 'INTERNAL', (result && result.message) || '预置对话框响应失败');
+          return { action: 'dialog', armed: result.armed, url: page.url, title: page.title };
+        }
         case 'press': {
           const page = await controller.ensurePage();
           return pressPage(page, args, lastFull);
@@ -1499,6 +1803,62 @@ window.__ModuleLoader__.load({
       const value = {
         action: 'type',
         changed: !!after && !!before && (after.url !== before.url || after.mutations !== before.mutations),
+        url: page.url,
+        title: page.title,
+      };
+      if (args.snapshot !== false) value.snapshot = await fullSnapshot(page, args);
+      return value;
+    }
+
+    async function selectPage(page, args) {
+      const ref = String(args.ref || '');
+      const before = await page.exec('state', {});
+      const result = await page.exec('selectOption', {
+        ref,
+        value: args.value,
+        label: args.label,
+        index: args.index,
+      });
+      if (!result || result.ok !== true) {
+        throw err((result && result.code) || 'INTERNAL', (result && result.message) || '选择选项失败');
+      }
+      await settle(page);
+      const after = await page.exec('state', {});
+      const selected = result.selected || {};
+      const value = {
+        action: 'select',
+        ref: result.ref || ref,
+        selected: {
+          value: String(selected.value ?? ''),
+          label: String(selected.label ?? ''),
+          index: Number(selected.index),
+        },
+        changed: result.changed === true || (!!after && !!before && (after.url !== before.url || after.mutations !== before.mutations)),
+        url: page.url,
+        title: page.title,
+      };
+      if (args.snapshot !== false) value.snapshot = await fullSnapshot(page, args);
+      return value;
+    }
+
+    async function uploadPage(page, args) {
+      const ref = String(args.ref || '');
+      const before = await page.exec('state', {});
+      const result = await page.exec('uploadFiles', { ref, files: args.files });
+      if (!result || result.ok !== true) {
+        throw err((result && result.code) || 'UPLOAD_FAILED', (result && result.message) || '上传失败');
+      }
+      await settle(page);
+      const after = await page.exec('state', {});
+      const files = Array.isArray(result.files) ? result.files.map((file) => ({
+        name: String(file && file.name ? file.name : '').split(/[\\/]/).pop() || '',
+        size: Number(file && file.size) || 0,
+      })) : [];
+      const value = {
+        action: 'upload',
+        ref: result.ref || ref,
+        files,
+        changed: result.changed === true || (!!after && !!before && (after.url !== before.url || after.mutations !== before.mutations)),
         url: page.url,
         title: page.title,
       };

@@ -102,6 +102,9 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 | `wait` | `{text\|selector\|url, state?:("visible"\|"hidden"), timeoutMs?:number, snapshot?:boolean, scope?:"viewport"}` | `{action:"wait", condition, waitedMs, url, title, snapshot?}` |
 | `click` | `{ref?} \| {x?,y?}, snapshot?:boolean, scope?:("viewport"\|"document")}` | `{action:"click", changed:boolean, snapshot?}` |
 | `type` | `{ref, text, clear?:boolean, submit?:boolean, snapshot?:boolean, scope?:("viewport"\|"document")}` | `{action:"type", changed:boolean, snapshot?}` |
+| `select` | `{ref, value?\|label?\|index?, snapshot?:boolean, delta?:boolean}` | `{action:"select", selected, snapshot?}` |
+| `upload` | `{ref, paths:string[1..5], snapshot?:boolean, delta?:boolean}` | `{action:"upload", files:[{name,size}], snapshot?}` |
+| `dialog` | `{action:"accept"\|"dismiss", promptText?:string}` | 预置一次性响应；不附 `snapshot` |
 | `press` | `{key, snapshot?:boolean, scope?:("viewport"\|"document")}` | `{action:"press", changed:boolean, snapshot?}` |
 | `scroll` | `{dy, dx?:number, snapshot?:boolean, scope?:("viewport"\|"document")}` | `{action:"scroll", scroll:{y,height,viewport}, snapshot?}` |
 | `nav` | `{action:"back"\|"forward"\|"reload"\|"goto", url?, snapshot?:boolean, scope?:("viewport"\|"document")}` | `{action, url, title, snapshot?}` |
@@ -115,7 +118,9 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 | `ping` | `{}` | `{pong:true, pageCount:number}` |
 
 补充约定：
-- `snapshot` 默认 `true`（除非显式 `false`），即动作/等待后回一张新快照。
+- `snapshot` 默认 `true`（除非显式 `false`），即动作/等待后回一张新快照；`dialog` 不附快照。
+- `select` 的 `value / label / index` 必须恰好一个，`index` 为零基；支持原生 `<select>` 及常见
+  `role=option/menuitem` 自定义下拉，返回 `selected` 与视口快照。
 - 动作后 `settle` 最长等待约 5 秒：页面 loading 或 DOM mutations 持续变化时重置安静计时，连续约 300ms 稳定即提前返回；持续动画到上限也正常回快照，不让动作失败。
 - `wait` 的 `text / selector / url` 必须恰好一个；`text` 匹配可见正文，`selector` 匹配主文档 CSS，`url` 匹配 URL 子串。`state:hidden` 仅用于 text/selector 的消失或隐藏；`timeoutMs` 默认 10000。
 - `changed`：动作是否让页面发生了变化（URL 变化、DOM 变更计数增加、或 input 值变化）。
@@ -127,7 +132,9 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 ### 2.3 错误码（Client → Host，写在 result.error.code）
 `NO_PAGE`（没有页面）、`NO_REF`（ref 不存在/已失效）、`NAV_BLOCKED`（URL 不合法或被策略拒绝）、
 `TIMEOUT`（页面在 waitMs 内未加载完）、`WAIT_TIMEOUT`（条件等待超时）、`INVALID_SELECTOR`（CSS 选择器无效）、
-`LOAD_FAILED`（did-fail-load）、`EVAL_DISABLED`、`NOT_DESKTOP`（web 客户端）、`INTERNAL`（其它，必须带 message 与 data.error）。
+`LOAD_FAILED`（did-fail-load）、`OPTION_NOT_FOUND`、`NOT_SELECT`、`FILE_READ_FAILED`、`UPLOAD_TOO_LARGE`、
+`NOT_FILE_INPUT`、`UPLOAD_FAILED`、`EVAL_DISABLED`、`NOT_DESKTOP`（web 客户端）、
+`INTERNAL`（其它，必须带 message 与 data.error）。新增工具错误码的触发条件见 §5.1。
 
 ## 3. Host 侧工具（模型看到的）
 
@@ -138,9 +145,14 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 | `browser_wait` | `text`/`selector`/`url` 其一, `state?`, `timeoutMs?`, `snapshot?` | 条件等待并回现场视口 |
 | `browser_click` | `ref?` 或 `x`+`y`, `snapshot?` | 点击 |
 | `browser_type` | `ref`, `text`, `clear?`, `submit?`, `snapshot?` | 输入 |
+| `browser_select` | `ref`, `value`/`label`/`index` 其一, `snapshot?`, `delta?` | 选择下拉项并回 `selected` 与视口快照 |
+| `browser_upload` | `ref`, `paths`, `snapshot?`, `delta?` | 上传 1–5 个本地文件并回文件名/大小与视口快照 |
+| `browser_dialog` | `action`(accept/dismiss), `promptText?` | 预置下一次对话框的一次性响应，不附快照 |
 | `browser_press` | `key`, `snapshot?` | 按键 |
 | `browser_scroll` | `dy`, `dx?`, `snapshot?` | 滚动 |
 | `browser_nav` | `action`(back/forward/reload/goto), `url?` | 导航 |
+| `browser_find` | `text`, `limit?` | 全文档查找元素 |
+| `browser_deep_snapshot` | `url?`, `maxNodes?`, `scope?`, `includeFrames?` | Host 直连 CDP，默认关闭 |
 | `browser_screenshot` | `fullPage?` | 回 PNG 落盘路径 |
 | `browser_tabs` | `action`(list/new/switch/close), `id?` | 多页管理 |
 | `browser_console` | `limit?` | 控制台近况 |
@@ -177,9 +189,29 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 
 写文件用 `node:fs/promises`，追加失败只打日志，**不**影响工具调用。
 
-## 5. 成本主线（省 token，§6 快照/delta 字段）
+## 5. 错误码、数据边界与成本主线
 
-默认每次工具调用都走「视口优先 + 不上送正文」：动作类工具（`open/click/type/press/scroll/nav`）
+### 5.1 新增工具错误码
+
+- `select`：未找到匹配项回 `OPTION_NOT_FOUND`；目标不是受支持的原生/自定义下拉回 `NOT_SELECT`。
+- `upload`：Host 读取失败回 `FILE_READ_FAILED`；总大小超过 8MiB 回 `UPLOAD_TOO_LARGE`；
+  目标不是 `input[type=file]` 回 `NOT_FILE_INPUT`；Client 设置文件或触发事件失败回 `UPLOAD_FAILED`。
+
+### 5.2 上传数据边界
+
+`upload` 仅接受 **1–5 个绝对本地路径，总大小不超过 8MiB**。Host 逐个异步读取文件，以一次性
+base64 命令下发；Client 用 `File` + `DataTransfer` 设置 `input[type=file]`，并触发 `input/change`。
+结果只含文件名/大小，不返回路径或 base64；文件内容/实际路径不进入审计，`paths` 仅记为数组占位。
+
+### 5.3 对话框限制
+
+`dialog` **必须在触发动作前调用**，为下一次 `alert/confirm/prompt` 预置一次性响应；无法关闭
+已经弹出的同步阻塞对话框，不支持 `beforeunload`。`confirm` 的 accept/dismiss 分别回 `true/false`；
+`prompt` accept 依次使用 `promptText`/对话框默认值/空串，dismiss 回 `null`。不附快照。
+
+### 5.4 成本主线（省 token，§6 快照/delta 字段）
+
+默认每次工具调用都走「视口优先 + 不上送正文」：动作类工具（`open/click/type/press/scroll/nav/select/upload`）
 下发快照时固定 `scope:viewport`、`text:false`；`browser_snapshot` 默认 `text:false`。只有
 `browser_snapshot text:true` 才回正文。这样把默认每步成本从 ~2-3k token 压到 ~1.0-1.2k。
 

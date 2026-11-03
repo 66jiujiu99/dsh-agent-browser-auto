@@ -2,12 +2,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-0.2.1--rc.2-6f42c1.svg)](#兼容性)
-[![Tests](https://img.shields.io/badge/tests-55%2F55%20pass-brightgreen.svg)](#验收状态2026-11-03-实测)
+[![Tests](https://img.shields.io/badge/tests-58%2F58%20pass-brightgreen.svg)](#验收状态2026-11-03-实测)
 
 给 DSH 桌面版装上「看得见的手」：模型用 `browser_*` 工具**看见并操作**右侧边栏里一个**用户可见**的浏览器页面。
 页面是本插件自己向主进程申请 lease 后创建的 Electron `<webview>`，不碰官方「浏览器」tab 的 DOM（合规、不随上游升级碎裂）。
 
-- 版本：0.3.0 · 目标：DSH 桌面版 0.2.1-rc.2（Electron 44.7.0）
+- 版本：0.4.0 · 目标：DSH 桌面版 0.2.1-rc.2（Electron 44.7.0）
 - 契约：`PROTOCOL.md`（Host ⇄ Client 的唯一协议，改字段两边一起改）
 
 **为什么不是 Playwright / Puppeteer**：那两个库会自己启动一个**独立的无头浏览器**——它看不见、也点不了
@@ -83,7 +83,7 @@ plugin_manager remove_bundle target=dsh-agent-browser-auto     # 再移除
 
 审计/调试数据不会自动删除，如需清理：删掉 `~/.dsh/storages/agent-browser-auto/` 即可。
 
-## 工具面（16 个）
+## 工具面（19 个）
 
 | 工具 | 作用 | 说明 |
 |---|---|---|
@@ -92,6 +92,9 @@ plugin_manager remove_bundle target=dsh-agent-browser-auto     # 再移除
 | `browser_wait` | 等条件成立后回快照 | `text` / `selector` / `url` 三选一；`state:"hidden"` 等消失；`timeoutMs` 默认 10000 |
 | `browser_click` | 点 `@ref` 或视口坐标 | 先走真实输入管线，无反应才退回 DOM click |
 | `browser_type` | 输入文本 | `clear` 先清空、`submit` 回车/提交表单 |
+| `browser_select` | 选择下拉项 | 原生 select 与常见自定义下拉；返回 `selected` 与视口快照 |
+| `browser_upload` | 上传本地文件 | 受控写入 `input[type=file]`，返回文件名/大小与视口快照 |
+| `browser_dialog` | 预置对话框响应 | 必须在触发动作前调用；`accept`/`dismiss`，不附快照 |
 | `browser_press` | 按键 | Enter/Tab/Escape/方向键/PageUp/PageDown/Home/End/Space |
 | `browser_scroll` | 滚动 | 先 wheel 事件，滚不动才 `scrollBy` |
 | `browser_nav` | back/forward/reload/goto | |
@@ -103,6 +106,18 @@ plugin_manager remove_bundle target=dsh-agent-browser-auto     # 再移除
 | `browser_network` | 请求近况 | 主文档 navigation entry + fetch/XHR 包装 + Resource Timing 兜底 |
 | `browser_eval` | 执行 JS | **默认关闭**（`enableEval`） |
 | `browser_close` | 释放页面 | 同时销毁 guest |
+
+**三项能力的关键边界**：
+
+- `browser_select` 的 `value` / `label` / `index` 必须三选一，`index` 从 0 开始；支持原生 `<select>`
+  及常见 `role=option/menuitem` 自定义下拉。未命中回 `OPTION_NOT_FOUND`，目标不支持回 `NOT_SELECT`。
+- `browser_upload` 仅接受 **1–5 个绝对本地路径、总大小不超过 8MiB**；Host 逐个异步读取后以一次性
+  base64 命令发给 Client，Client 用 `File` + `DataTransfer` 设置 `input[type=file]` 并触发 `input/change`。
+  结果只含文件名/大小，不含路径或 base64；文件内容/实际路径不进入审计，`paths` 仅记为数组占位。
+  错误为 `FILE_READ_FAILED` / `UPLOAD_TOO_LARGE` / `NOT_FILE_INPUT` / `UPLOAD_FAILED`。
+- `browser_dialog` **必须在触发动作前调用**，为下一次 `alert/confirm/prompt` 预置一次性响应；
+  无法关闭已经弹出的同步阻塞对话框，不支持 `beforeunload`。`confirm` 的 accept/dismiss 分别回
+  `true/false`；`prompt` accept 依次使用 `promptText`/对话框默认值/空串，dismiss 回 `null`。不附快照。
 
 动作后会自动等待页面稳定：loading 或 DOM 持续变化时重置安静窗口，连续约 300ms 稳定即返回，
 最多等 5 秒；需要等待指定内容时用 `browser_wait`，例如 `{selector:"#loading",state:"hidden"}`。
@@ -120,10 +135,10 @@ stats: 1 elements, 74 chars, ~19 tokens (scope=viewport)
 ```
 
 - **成本默认最低**：`browser_snapshot` 默认 `text:false`（不发正文，最大头）、`scope:viewport`（只列视口内元素）；
-  要看正文传 `text:true`（`textLimit` 默认 3000），要看全部元素传 `scope:document`。动作类工具（`open/click/type/press/scroll/nav`）
+  要看正文传 `text:true`（`textLimit` 默认 3000），要看全部元素传 `scope:document`。动作类工具（`open/click/type/press/scroll/nav/select/upload`）
   回快照时同样默认视口 + 无正文。隐藏/零尺寸元素由 Client 几何剔除，不占用 token。
 - 每个快照都带 `stats: {elements, chars, estTokens, scope}`，可据此对比成本。
-- 动作类工具（`click/type/press/scroll/nav`）执行后**默认回全量视口结构**：模型一步拿到
+- 动作类工具（`click/type/press/scroll/nav/select/upload`）执行后**默认回全量视口结构**：模型一步拿到
   「现在页面上有什么」，不必再调 `browser_snapshot`；传 `snapshot:false` 才省略快照。
 - 要省 token 时对上述工具传 `delta:true`：同一 URL 只报**增量** `[delta]`
   （`added/removed/changed` + `textChanged` 时短采样 + `textSample`），
@@ -281,7 +296,7 @@ JavaScript，没有任何编译产物或下载执行步骤。这也是本仓库�
 3. **关掉右栏/关掉 tab 后命令不可达**：会立刻回 `NO_CLIENT`，不会排队等到你打开。
 4. **`browser_eval` 受页面 CSP 限制**（部分站点禁止 `eval`），失败会给可读错误。
 5. **截图是视口截图**：`fullPage` 通过临时拉高元素高度实现，超长页面最多截 4000px。
-6. **下载/上传/摄像头/地理位置**被主进程硬禁用，属于平台约束而非本插件遗留问题。
+6. **下载/摄像头/地理位置**被主进程硬禁用；文件上传仅走 `browser_upload` 的受控文件 input 通道，边界见上。
 7. Client 半边热更会重建页面：HMR 之后原来的页面对象与 guest 会丢失，需要重新 `browser_open`（Host 会回 `NO_CLIENT`/`NO_PAGE` 提示重开）。
 8. **深度模式需要重启**：随机调试端口只在用 `tools/start-dsh-debug.cmd` 启动的那次会话里存在；
    普通启动没有端口，`browser_deep_snapshot` 会回 `DEEP_UNAVAILABLE`。关闭 DSH 再正常启动即可恢复默认（无端口）。
@@ -303,17 +318,18 @@ JavaScript，没有任何编译产物或下载执行步骤。这也是本仓库�
 **验证方法（可复现）**
 
 ```bash
-# 单元测试：快照渲染 / 差分 / 工具参数 / CDP 错误映射（55 项）
+# 单元测试：快照渲染 / 差分 / 工具参数 / CDP 错误映射（58 项）
 ELECTRON_RUN_AS_NODE=1 "C:\Data\APP\dsh\DeepSeek Harness.exe" --test test/*.test.mjs
 
 # CDP 集成测试：用真 Chrome（headless + 随机端口）当靶子，不碰你的 DSH
 node C:\Data\deepseek\_probe-cdp\run.mjs
 ```
 
-- 单元测试 **55 / 55 通过**（snapshot 20 · tools 13 · cdp 22）。
+- 单元测试 **58 / 58 通过**（snapshot 20 · tools 16 · cdp 22）。
 - CDP 集成测试 **17 / 17 通过**：端口文件发现与缓存、`DEEP_UNAVAILABLE` 文案、discover、
   a11y 与 dom 两条读取路线、跨源 iframe（含坐标换算）、各类不可达错误码。
 - 能力边界 **4 / 4 通过**：closed shadow root 可读、canvas 文字不可读（如实记录，不夸大）。
 - 启动器 **6 条路径**全部实测：文件缺失 / 已有实例 / 成功 / 探活失败 / 超时 / 残留端口文件清理。
 
-> 说明：以上数字都来自本机实测，不是设计目标。未在 macOS / Linux 上验证过，因此不做声明。
+> 说明：以上数字都来自本机实测，不是设计目标。0.4.0 新增工具的测试数字仅指单元测试，
+> 不声明真实网页 E2E 已通过；未在 macOS / Linux 上验证过，因此不做声明。

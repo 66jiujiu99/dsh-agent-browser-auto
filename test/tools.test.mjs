@@ -13,6 +13,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { buildBrowserTools } from '../lib/tools.js'
 import { BridgeError } from '../lib/bridge.js'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const BASE_CONFIG = {
   enableEval: false,
@@ -73,11 +76,11 @@ const frameA = {
   ],
 }
 
-test('16 个工具都注册且 schema 只用受支持关键字', () => {
+test('19 个工具都注册且 schema 只用受支持关键字', () => {
   const tools = buildBrowserTools(makeDeps([frameA]))
-  assert.equal(tools.length, 16)
+  assert.equal(tools.length, 19)
   const names = tools.map((t) => t.name)
-  for (const required of ['browser_open', 'browser_snapshot', 'browser_wait', 'browser_click', 'browser_nav', 'browser_close']) {
+  for (const required of ['browser_open', 'browser_snapshot', 'browser_wait', 'browser_click', 'browser_select', 'browser_upload', 'browser_dialog', 'browser_nav', 'browser_close']) {
     assert.ok(names.includes(required), `缺少 ${required}`)
   }
   const allowed = new Set(['type', 'oneOf', 'properties', 'required', 'additionalProperties', 'items', 'enum', 'const', 'description', 'title', 'default', 'examples'])
@@ -136,6 +139,62 @@ test('browser_wait 恰好一个条件，默认等待 10 秒并回视口', async 
 
   calls.length = 0
   const invalid = await run(tools.browser_wait, { text: '完成', selector: '#done' }, 's-wait-invalid')
+  assert.ok(invalid.includes('BAD_ARGUMENTS'), invalid)
+  assert.equal(calls.length, 0)
+})
+
+test('browser_select 恰好一个选择条件并回视口', async () => {
+  const calls = []
+  const tools = toolset(makeDeps([frameA], calls))
+  await run(tools.browser_select, { ref: '@e7', label: '四川' }, 's-select-label')
+  assert.deepEqual(calls[0].args, { ref: '@e7', snapshot: true, scope: 'viewport', label: '四川' })
+
+  calls.length = 0
+  await run(tools.browser_select, { ref: '@e7', value: '', snapshot: false }, 's-select-value')
+  assert.deepEqual(calls[0].args, { ref: '@e7', snapshot: false, value: '' })
+
+  calls.length = 0
+  const invalid = await run(tools.browser_select, { ref: '@e7', label: '四川', index: 1 }, 's-select-invalid')
+  assert.ok(invalid.includes('BAD_ARGUMENTS'), invalid)
+  assert.equal(calls.length, 0)
+})
+
+test('browser_upload 读取绝对路径并只下发文件名、MIME 与 base64', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'browser-upload-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const path = join(dir, 'proof.txt')
+  await writeFile(path, 'upload-content', 'utf8')
+  const calls = []
+  const deps = makeDeps([frameA], calls)
+  const audits = []
+  deps.audit.audit = (entry) => audits.push(entry)
+  const tools = toolset(deps)
+  await run(tools.browser_upload, { ref: '@e8', paths: [path] }, 's-upload-file')
+  assert.equal(calls[0].op, 'upload')
+  assert.deepEqual(calls[0].args.files, [{
+    name: 'proof.txt', type: 'text/plain', base64: Buffer.from('upload-content').toString('base64'),
+  }])
+  assert.equal(calls[0].args.scope, 'viewport')
+  assert.equal(audits.length, 1)
+  assert.deepEqual(audits[0].args.paths, '[object]')
+  assert.ok(!JSON.stringify(audits).includes('upload-content'))
+  assert.ok(!JSON.stringify(audits).includes(Buffer.from('upload-content').toString('base64')))
+
+  calls.length = 0
+  const invalid = await run(tools.browser_upload, { ref: '@e8', paths: ['relative.txt'] }, 's-upload-relative')
+  assert.ok(invalid.includes('BAD_ARGUMENTS'), invalid)
+  assert.equal(calls.length, 0)
+})
+
+test('browser_dialog 预置一次性响应并校验 promptText', async () => {
+  const calls = []
+  const tools = toolset(makeDeps([frameA], calls))
+  const text = await run(tools.browser_dialog, { action: 'accept', promptText: '张' }, 's-dialog-accept')
+  assert.deepEqual(calls[0].args, { action: 'accept', promptText: '张' })
+  assert.ok(text.includes('dialog accept armed'), text)
+
+  calls.length = 0
+  const invalid = await run(tools.browser_dialog, { action: 'dismiss', promptText: '不应携带' }, 's-dialog-invalid')
   assert.ok(invalid.includes('BAD_ARGUMENTS'), invalid)
   assert.equal(calls.length, 0)
 })

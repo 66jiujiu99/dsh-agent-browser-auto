@@ -2,6 +2,22 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 0.4.0 — 2026-11-03
+
+### 新增
+
+- **`browser_select`**：按 `value` / `label` / 零基 `index` 三选一选择下拉项，支持原生 `<select>`
+  与常见 `role=option/menuitem` 自定义下拉，返回 `selected` 与视口快照。
+- **`browser_upload`**：向 `input[type=file]` 上传 1–5 个绝对本地路径，合计不超过 8MiB；
+  结果只含文件名与大小，不回传路径或 base64；文件内容/实际路径不进入审计，`paths` 仅记为数组占位。
+- **`browser_dialog`**：在触发动作前为下一次 `alert/confirm/prompt` 预置一次性 `accept/dismiss`
+  响应；不能关闭已弹出的同步阻塞对话框，不支持 `beforeunload`，不附快照。
+
+### 验证
+
+- 工具总数由 16 增至 19；单元测试 **58 / 58 通过**（snapshot 20 · tools 16 · cdp 22）。
+  此处仅记录单元测试结果，不声明新增工具已通过真实网页 E2E。
+
 ## 0.3.0 — 2026-11-03
 
 ### 新增
