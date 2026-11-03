@@ -197,8 +197,9 @@ stats: 2 elements, 180 chars, ~50 tokens (scope=viewport)
 - 末尾固定 `stats:` 行（`elements / chars / estTokens / scope`）。
 - 视口优先：仅列视口内元素，视口外用 `另有 N 个元素…` 一行提示。
 
-### 6.2 增量 delta（动作后同 URL 的「变化」）
-动作类工具在 **同一 URL** 的后续调用里走 delta（首帧/URL 变/找不到上一帧则降级全量）：
+### 6.2 增量 delta（`delta:true` 且动作后同 URL 时的「变化」，默认关闭）
+动作类工具带 `delta:true` 且 **同一 URL** 时走 delta（首帧/URL 变/找不到上一帧则降级全量；
+不带 `delta:true` 时一律全量，见 0.2.0 变更）：
 ```
 <title> · <url> [delta]
 text changed: true
@@ -215,8 +216,8 @@ stats: 1 elements, 220 chars, ~60 tokens (scope=viewport) +1 -0 ~1 textChanged t
   另带 `+added -removed ~changed`、`textChanged`、`total=<整页可见元素数>`。
 
 > 注：delta 由 Host 在动作工具里串联两帧（上一帧全量快照 + 动作后快照）实现，协议层面
-> Client 只回全量 snapshot；Host 用 `lib/snapshot.js::renderDelta` 对比，URL 变 / 首帧 /
-> 无上一帧时自动降级为全量。已实现。
+> Client 只回全量 snapshot；Host 用 `lib/snapshot.js::renderDelta` 对比，且仅在工具参数
+> `delta:true` 时启用（默认全量视口）。URL 变 / 首帧 / 无上一帧时自动降级为全量。已实现。
 
 ## 7. 深度模式（CDP）—— Host 直连，不经 Client 命令通道
 

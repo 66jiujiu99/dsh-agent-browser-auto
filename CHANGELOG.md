@@ -2,6 +2,19 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 0.2.0 — 2026-11-03
+
+### 变更
+
+- **动作后默认回全量视口结构**：`click / type / press / scroll / nav` 执行完直接返回完整的
+  视口交互元素快照（与 `browser_open` 一致），模型一步看到「现在页面上有什么」，
+  不必再补一次 `browser_snapshot`。
+- **`[delta]` 增量降级为显式参数**：上述工具新增 `delta:true` 才走同 URL 增量渲染
+  （只报 added/removed/changed，省 token）；默认 `false`。
+  动机：增量只告诉模型「变了什么」，不告诉「现在有什么」——连续操作时模型脑内全貌
+  靠叠加 delta，容易漂；且 `removed` 只给 ref、滚动场景增量反而更长。
+  典型量级：全量视口 ≈300–1200 tokens，增量 ≈50–150，省下的抵不过一次补调 snapshot 的往返。
+
 ## 0.1.0 — 2026-10-23
 
 首个可用版本，对齐 DSH 桌面版 0.2.1-rc.2（Electron 44.7.0）。

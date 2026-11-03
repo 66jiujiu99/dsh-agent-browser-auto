@@ -5,7 +5,8 @@
  *   - 快照类工具默认 `scope:viewport`、不带正文；
  *   - `browser_snapshot` 的 text/scope 显式 opt-in；
  *   - 动作类工具默认回快照（scope:viewport）、`snapshot:false` 被尊重；
- *   - 同 URL 动作走 `[delta]`，URL 变化 / 口径不一致回全量；
+ *   - 动作后默认回**全量视口结构**；`delta:true` 且同 URL 才走 `[delta]`，
+ *     URL 变化 / 口径不一致时 delta 也降级回全量；
  *   - `browser_type` 的 `text`（输入内容）不被快照参数覆盖。
  */
 import test from 'node:test'
@@ -133,7 +134,25 @@ test('browser_type 的 text（输入内容）不被快照参数覆盖', async ()
   assert.equal(calls[0].args.scope, 'viewport')
 })
 
-test('同 URL 动作走 [delta]：added/removed 出现，不再整页重发', async () => {
+test('同 URL 动作默认回全量视口：新旧元素都在，模型无需再调 browser_snapshot', async () => {
+  const after = {
+    url: 'https://e.com/', title: '例', scope: 'viewport',
+    elements: [
+      { ref: '@e1', role: 'link', name: '首页', href: 'https://e.com/', inViewport: true },
+      { ref: '@e9', role: 'button', name: '退出', inViewport: true },
+    ],
+  }
+  const tools = toolset(makeDeps([frameA, after]))
+  const session = 's-full-default'
+  await run(tools.browser_open, { url: 'https://e.com/' }, session)
+  const text = await run(tools.browser_click, { ref: '@e2' }, session)
+  assert.ok(!text.includes('[delta]'), text)
+  assert.ok(text.includes('click @e2'), text)
+  assert.ok(text.includes('@e1'), text)
+  assert.ok(text.includes('@e9'), text)
+})
+
+test('delta:true 时同 URL 动作走 [delta]：added/removed 出现，不再整页重发', async () => {
   const after = {
     url: 'https://e.com/', title: '例', scope: 'viewport',
     elements: [
@@ -144,14 +163,14 @@ test('同 URL 动作走 [delta]：added/removed 出现，不再整页重发', as
   const tools = toolset(makeDeps([frameA, after]))
   const session = 's-delta-same'
   await run(tools.browser_open, { url: 'https://e.com/' }, session)
-  const text = await run(tools.browser_click, { ref: '@e2' }, session)
+  const text = await run(tools.browser_click, { ref: '@e2', delta: true }, session)
   assert.ok(text.includes('[delta]'), text)
   assert.ok(text.includes('+ @e9 button "退出"'), text)
   assert.ok(text.includes('removed (1): @e2'), text)
   assert.ok(text.includes('+1 -1'), text)
 })
 
-test('URL 变化时回全量（不带 [delta]）', async () => {
+test('delta:true 但 URL 变化时回全量（不带 [delta]）', async () => {
   const next = {
     url: 'https://e.com/next', title: '下一页', scope: 'viewport',
     elements: [{ ref: '@e1', role: 'link', name: '返回', href: 'https://e.com/', inViewport: true }],
@@ -159,20 +178,20 @@ test('URL 变化时回全量（不带 [delta]）', async () => {
   const tools = toolset(makeDeps([frameA, next]))
   const session = 's-delta-url'
   await run(tools.browser_open, { url: 'https://e.com/' }, session)
-  const text = await run(tools.browser_click, { ref: '@e2' }, session)
+  const text = await run(tools.browser_click, { ref: '@e2', delta: true }, session)
   assert.ok(!text.includes('[delta]'), text)
   assert.ok(text.includes('下一页'), text)
 })
 
-test('scope 口径不一致时回全量（不产生误导性 diff）', async () => {
+test('delta:true 但 scope 口径不一致时回全量（不产生误导性 diff）', async () => {
   const tools = toolset(makeDeps([frameA]))
   const session = 's-delta-scope'
   await run(tools.browser_open, { url: 'https://e.com/', scope: 'document' }, session)
-  const text = await run(tools.browser_click, { ref: '@e2' }, session)
+  const text = await run(tools.browser_click, { ref: '@e2', delta: true }, session)
   assert.ok(!text.includes('[delta]'), text)
 })
 
-test('delta 的 stats 按增量文本计，且带 total/计数', async () => {
+test('delta:true 的 stats 按增量文本计，且带 total/计数', async () => {
   const after = {
     url: 'https://e.com/', title: '例', scope: 'viewport',
     elements: [{ ref: '@e1', role: 'link', name: '首页', href: 'https://e.com/', inViewport: true }],
@@ -180,7 +199,7 @@ test('delta 的 stats 按增量文本计，且带 total/计数', async () => {
   const tools = toolset(makeDeps([frameA, after]))
   const session = 's-delta-stats'
   await run(tools.browser_open, { url: 'https://e.com/' }, session)
-  const text = await run(tools.browser_click, { ref: '@e2' }, session)
+  const text = await run(tools.browser_click, { ref: '@e2', delta: true }, session)
   assert.ok(text.includes('[delta]'), text)
   assert.ok(/\+\d+ -\d+ ~\d+/.test(text), text)
   assert.ok(/total=\d+/.test(text), text)

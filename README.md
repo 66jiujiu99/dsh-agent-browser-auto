@@ -117,8 +117,12 @@ stats: 1 elements, 74 chars, ~19 tokens (scope=viewport)
   要看正文传 `text:true`（`textLimit` 默认 3000），要看全部元素传 `scope:document`。动作类工具（`open/click/type/press/scroll/nav`）
   回快照时同样默认视口 + 无正文。隐藏/零尺寸元素由 Client 几何剔除，不占用 token。
 - 每个快照都带 `stats: {elements, chars, estTokens, scope}`，可据此对比成本。
-- 同一 URL 的动作后走**增量** `[delta]`：只报 `added/removed/changed`（+ `textChanged` 时短采样 + `textSample`），
-  `stats` 按增量文本自身计并附 `+a -r ~c total=N`；URL 变化 / 首帧 / 找不到上一帧自动回全量。详见 `PROTOCOL.md` §6。
+- 动作类工具（`click/type/press/scroll/nav`）执行后**默认回全量视口结构**：模型一步拿到
+  「现在页面上有什么」，不必再调 `browser_snapshot`；传 `snapshot:false` 才省略快照。
+- 要省 token 时对上述工具传 `delta:true`：同一 URL 只报**增量** `[delta]`
+  （`added/removed/changed` + `textChanged` 时短采样 + `textSample`），
+  `stats` 按增量文本自身计并附 `+a -r ~c total=N`；URL 变化 / 首帧 / 找不到上一帧自动回全量。
+  详见 `PROTOCOL.md` §6。
 - `@ref` 稳定：同一元素在多次快照里保持同一个 ref；页面重渲染把节点换掉后，点击会按「角色 + 名字」
   自动找回语义相同的元素（并在结果里标 `recovered`），找不到才回 `NO_REF` 让你重拍快照。
 - **穿透 Shadow DOM 与同源 iframe**：快照递归进入 open shadow root 与同源 iframe（含嵌套），
