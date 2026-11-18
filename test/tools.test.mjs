@@ -11,7 +11,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildBrowserTools } from '../lib/tools.js'
+import { buildBrowserTools, toolOrder, BROWSER_TOOL_NAMES } from '../lib/tools.js'
 import { BridgeError } from '../lib/bridge.js'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -76,11 +76,11 @@ const frameA = {
   ],
 }
 
-test('22 个工具都注册且 schema 只用受支持关键字', () => {
+test('24 个工具都注册且 schema 只用受支持关键字', () => {
   const tools = buildBrowserTools(makeDeps([frameA]))
-  assert.equal(tools.length, 22)
+  assert.equal(tools.length, 24)
   const names = tools.map((t) => t.name)
-  for (const required of ['browser_agent_ensure', 'browser_backend', 'browser_open', 'browser_snapshot', 'browser_wait', 'browser_click', 'browser_select', 'browser_upload', 'browser_dialog', 'browser_nav', 'browser_close', 'browser_tab_front']) {
+  for (const required of ['browser_agent_ensure', 'browser_backend', 'browser_open', 'browser_snapshot', 'browser_wait', 'browser_click', 'browser_select', 'browser_upload', 'browser_dialog', 'browser_nav', 'browser_close', 'browser_tab_front', 'browser_ext_pair', 'browser_ext_status']) {
     assert.ok(names.includes(required), `缺少 ${required}`)
   }
   const allowed = new Set(['type', 'oneOf', 'properties', 'required', 'additionalProperties', 'items', 'enum', 'const', 'description', 'title', 'default', 'examples'])
@@ -316,17 +316,17 @@ test('delta:true 的 stats 按增量文本计，且带 total/计数', async () =
   assert.ok(Number.isFinite(tokens) && tokens < 100, `delta tokens=${tokens}`)
 })
 
-test('browser_tabs 在最后一个标签关闭后允许 activeId=null', async () => {
+test('browser_tabs 在最后一个标签关闭后省略 activeId（DSH 校验不支持 null 输出）', async () => {
   const deps = makeDeps([frameA])
   deps.bridge.sendCommand = async () => ({
     clientId: 'c-1',
     value: { ok: true, tabs: [], activeId: null },
   })
   const tools = toolset(deps)
-  assert.deepEqual(tools.browser_tabs.output.schema.properties.activeId.type, ['string', 'null'])
+  assert.equal(tools.browser_tabs.output.schema.properties.activeId.type, 'string')
   const value = await tools.browser_tabs.execute({ action: 'list' }, { agent: { id: 's-tabs-empty' } })
   assert.equal(value.ok, true)
-  assert.equal(value.activeId, null)
+  assert.equal('activeId' in value, false)
   assert.deepEqual(value.tabs, [])
 })
 
@@ -445,4 +445,124 @@ test('browser_tab_front：real 后端 list/activate 下发 tabFront，activate �
     assert.equal(value.error.code, 'BAD_ARGUMENTS')
   }
   assert.equal(calls.length, 1)
+})
+
+test('工具截断窗口：extensionBridge.enabled 时 ext 工具换进第 15/16 位', () => {
+  const disabled = toolOrder(BASE_CONFIG)
+  assert.deepEqual(disabled, BROWSER_TOOL_NAMES)
+  const enabled = toolOrder({ extensionBridge: { enabled: true } })
+  assert.equal(enabled[14], 'browser_ext_pair')
+  assert.equal(enabled[15], 'browser_ext_status')
+  // 换出的 find/deep_snapshot 顺延到尾部，其余相对顺序不变。
+  assert.equal(enabled.indexOf('browser_find'), 16)
+  assert.equal(enabled.indexOf('browser_deep_snapshot'), 17)
+  assert.equal(enabled.length, BROWSER_TOOL_NAMES.length)
+  for (const name of BROWSER_TOOL_NAMES) assert.ok(enabled.includes(name), `${name} 丢失`)
+})
+
+test('browser_ext_pair：未注入扩展桥接回 EXTENSION_DISABLED，注入后回配对码与指引', async () => {
+  const off = toolset(makeDeps([frameA]))
+  const disabled = await off.browser_ext_pair.execute({}, { agent: { id: 's-pair-off' } })
+  assert.equal(disabled.ok, false)
+  assert.equal(disabled.error.code, 'EXTENSION_DISABLED')
+  assert.ok(disabled.error.message.includes('extensionBridge.enabled'), disabled.error.message)
+  const offText = await run(off.browser_ext_pair, {}, 's-pair-off-render')
+  assert.ok(offText.includes('EXTENSION_DISABLED'), offText)
+
+  const deps = makeDeps([frameA])
+  let pairCalls = 0
+  deps.extensionBridge = {
+    async beginPairing() {
+      pairCalls += 1
+      return { ok: true, code: 'K7M2QP9A', expiresAt: 1_700_000_000_000, port: 9335, wsUrl: 'ws://127.0.0.1:9335' }
+    },
+  }
+  const tools = toolset(deps)
+  const value = await tools.browser_ext_pair.execute({}, { agent: { id: 's-pair-on' } })
+  assert.equal(pairCalls, 1)
+  assert.equal(value.ok, true)
+  assert.equal(value.code, 'K7M2QP9A')
+  assert.equal(value.port, 9335)
+  assert.ok(value.instructions.includes('K7M2QP9A'), value.instructions)
+  assert.ok(value.instructions.includes('extension'), value.instructions)
+  assert.deepEqual(JSON.parse(JSON.stringify(value)), value)
+  const text = await run(tools.browser_ext_pair, {}, 's-pair-on-render')
+  assert.ok(text.includes('K7M2QP9A'), text)
+  assert.ok(text.includes('ws://127.0.0.1:9335'), text)
+})
+
+test('browser_ext_status：未启用时 ok:true + enabled:false；注入后透出在线状态且 lossless', async () => {
+  const off = toolset(makeDeps([frameA]))
+  const disabled = await off.browser_ext_status.execute({}, { agent: { id: 's-status-off' } })
+  assert.equal(disabled.ok, true)
+  assert.equal(disabled.enabled, false)
+  assert.equal(disabled.connected, false)
+  assert.equal('clientId' in disabled, false)
+  const offText = await run(off.browser_ext_status, {}, 's-status-off-render')
+  assert.ok(offText.includes('disabled'), offText)
+
+  const deps = makeDeps([frameA])
+  deps.extensionBridge = {
+    status() {
+      return { enabled: true, listening: true, port: 9335, portError: '', paired: true, connected: true, clientId: 'ext-x', sessions: 1, lastHeartbeatMs: 1200, pairPending: false }
+    },
+  }
+  const tools = toolset(deps)
+  const value = await tools.browser_ext_status.execute({}, { agent: { id: 's-status-on' } })
+  assert.equal(value.ok, true)
+  assert.equal(value.enabled, true)
+  assert.equal(value.connected, true)
+  assert.equal(value.clientId, 'ext-x')
+  assert.equal(value.lastHeartbeatMs, 1200)
+  assert.deepEqual(JSON.parse(JSON.stringify(value)), value)
+  const text = await run(tools.browser_ext_status, {}, 's-status-on-render')
+  assert.ok(text.includes('ext-x'), text)
+  assert.ok(text.includes('listening'), text)
+})
+
+test('browser_backend action:"extension" 参数放行并透传给后端路由', async () => {
+  const calls = []
+  const deps = makeDeps([frameA])
+  deps.backend = {
+    execute: async (sessionId, args) => {
+      calls.push({ sessionId, args })
+      return { ok: true, backend: 'extension', previousBackend: 'embedded', extension: { connected: true } }
+    },
+  }
+  const tools = toolset(deps)
+  const text = await run(tools.browser_backend, { action: 'extension' }, 's-backend-ext')
+  assert.equal(calls[0].args.action, 'extension')
+  assert.ok(text.includes('backend: extension'), text)
+  assert.ok(text.includes('extension bridge: connected'), text)
+})
+
+test('browser_tab_front：扩展模式在线可下发，离线回 EXTENSION_OFFLINE', async () => {
+  const calls = []
+  const deps = makeDeps([frameA], calls)
+  deps.bridge.sendCommand = async (sessionId, op, args, timeoutMs) => {
+    calls.push({ sessionId, op, args, timeoutMs })
+    return { clientId: 'ext-1', value: { tabs: [{ index: 0, pageId: '11', url: 'https://e.com/', title: '例', active: true }], activeId: '11', count: 1 } }
+  }
+  deps.backend = {
+    modeOf: () => 'extension',
+    status: () => ({ ok: true, backend: 'extension', extension: { connected: true, clientId: 'ext-1' } }),
+  }
+  const tools = toolset(deps)
+  const listed = await tools.browser_tab_front.execute({ action: 'list' }, { agent: { id: 's-tabfront-ext' } })
+  assert.equal(listed.ok, true)
+  assert.equal(calls[0].op, 'tabFront')
+  assert.equal(listed.count, 1)
+  assert.deepEqual(JSON.parse(JSON.stringify(listed)), listed)
+  const listText = await run(tools.browser_tab_front, {}, 's-tabfront-ext-render')
+  assert.ok(listText.includes('tabFront list (1'), listText)
+
+  const offline = makeDeps([frameA])
+  offline.backend = {
+    modeOf: () => 'extension',
+    status: () => ({ ok: true, backend: 'extension', extension: { connected: false } }),
+  }
+  const offlineValue = await toolset(offline).browser_tab_front.execute({ action: 'list' }, { agent: { id: 's-tabfront-ext-off' } })
+  assert.equal(offlineValue.ok, false)
+  assert.equal(offlineValue.error.code, 'EXTENSION_OFFLINE')
+  assert.ok(offlineValue.error.message.includes('browser_ext_pair'), offlineValue.error.message)
 })

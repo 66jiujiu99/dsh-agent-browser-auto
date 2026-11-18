@@ -2,17 +2,19 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-0.2.1--rc.2-6f42c1.svg)](#兼容性)
-[![Tests](https://img.shields.io/badge/tests-86%2F86%20pass-brightgreen.svg)](#验收状态2026-11-03-实测)
+[![Tests](https://img.shields.io/badge/tests-111%2F111%20pass-brightgreen.svg)](#验收状态2026-11-03-实测)
 
 给 DSH 桌面版装上「看得见的手」：模型用 `browser_*` 工具看见并操作用户可见的浏览器页面。
-默认是右侧边栏里的轻量 Electron `<webview>`；需要完整浏览器能力时，可显式切换到独立 Agent profile 的真实 Chrome/Edge。
+默认是右侧边栏里的轻量 Electron `<webview>`；需要完整浏览器能力时，可显式切换到独立 Agent profile 的真实 Chrome/Edge；
+要操作**用户日常浏览器**（默认 profile）时，可启用扩展桥接——装一个 MV3 扩展，不开调试端口、没有授权弹窗。
 
-- 版本：0.7.0 · 目标：DSH 桌面版 0.2.1-rc.5（Electron 44.7.0）
-- 契约：`PROTOCOL.md`（Host ⇄ Client 协议与双后端路由，改字段两边一起改）
+- 版本：0.8.0 · 目标：DSH 桌面版 0.2.1-rc.5（Electron 44.7.0）
+- 契约：`PROTOCOL.md`（Host ⇄ Client ⇄ 扩展协议与三后端路由，改字段两边一起改）
 
-**为什么有两种模式**：轻量模式启动快、就在侧边栏里，适合普通读取和表单操作；真实模式使用系统 Chrome/Edge
-与 `playwright-core`，提供原生窗口、F12 和完整 Playwright 操作链。`playwright-core` 不下载浏览器，也不会读取或复制日常浏览器 profile。
-两种模式共用工具有参数，但凭证、存储和页面不互相同步；切回轻量模式不会销毁真实浏览器页面。
+**为什么有三种模式**：轻量模式启动快、就在侧边栏里，适合普通读取和表单操作；真实模式使用系统 Chrome/Edge
+与 `playwright-core`，提供原生窗口、F12 和完整 Playwright 操作链；扩展桥接模式则直接操作用户**日常**
+浏览器里已打开的真实标签页。`playwright-core` 不下载浏览器，也不读取或复制日常浏览器 profile。
+模式间共用工具有参数，但凭证、存储和页面不互相同步；切换永远是显式的，失败绝不自动回退。
 
 ## 它长什么样
 
@@ -23,8 +25,10 @@
 模型 ──browser_*──▶ Host 工具层（URL 策略 + 审计 + 会话后端路由）
                          ├─ 默认：长轮询 ─▶ 侧边栏 Client ─▶ <webview>
                          │    └─ executeJavaScript + sendInputEvent + capturePage
-                         └─ 显式真实模式：Playwright ─▶ 系统 Chrome/Edge
-                              └─ 每会话专用持久/临时 profile，或 loopback CDP 显式连接
+                         ├─ 显式真实模式：Playwright ─▶ 系统 Chrome/Edge
+                         │    └─ 每会话专用持久/临时 profile，或 loopback CDP 显式连接
+                         └─ 显式扩展桥接（0.8.0）：loopback WebSocket ─▶ 日常浏览器 MV3 扩展
+                              └─ chrome.tabs + chrome.scripting 注入共享 pageAgent
 ```
 
 ### P2 侧边栏
@@ -43,8 +47,9 @@
 | 真实浏览器·持久 profile | `browser_backend {action:"launch"}` | 每个 Agent 会话使用独立 Chrome/Edge profile；不复制日常浏览器 Cookie | `embedded` 仅切回；`disconnect` 断开；`closeBrowser:true` 关闭本 session 启动的浏览器 |
 | 真实浏览器·临时 profile | `launch` + `temporary:true` | 会话隔离，浏览器上下文关闭时删除 | 适合一次性任务，不保存登录态 |
 | 连接已有浏览器 | `connect` + loopback `endpoint` | 默认只控制 Agent 新建页；已有页必须再用 `pageUrl` 精确分享 | 非本插件启动的浏览器不会被插件强制关闭 |
+| 扩展桥接·日常浏览器（0.8.0） | `browser_backend {action:"extension"}`（先 `browser_ext_pair` 配对） | 用户日常浏览器里 **agent 自己打开的标签页**（`browser_tab_front activate` 可显式接管已有标签）；登录态就是用户自己的 | `embedded` 仅切回；扩展侧弹窗「清除配对」即撤销授权 |
 
-模式按 **Agent session** 保存，启动/连接成功后才切换，失败不会自动回退。真实窗口使用浏览器原生 F12。
+模式按 **Agent session** 保存，启动/连接/配对成功后才切换，失败不会自动回退。真实窗口使用浏览器原生 F12。
 这不是风控绕过或“环境伪装”功能，不隐藏自动化，不修改 UA，不同步 Cookie；目标网站仍可提示异常或拒绝访问。
 
 ## 安装
@@ -76,7 +81,7 @@ git clone https://github.com/66jiujiu99/dsh-agent-browser-auto.git
 
 也可以 GitHub → **Code → Download ZIP** 解压（那就回到第 0 步先解除下载锁）。
 
-本插件不发布 npm 包。运行依赖只有锁定版本的 `playwright-core`；通过 `plugin_manager install_bundle` 安装时由 DSH 处理依赖。
+本插件不发布 npm 包。运行依赖只有锁定版本的 `playwright-core` 与 `ws`；通过 `plugin_manager install_bundle` 安装时由 DSH 处理依赖。
 它不会下载 Chromium，真实模式只使用本机已安装的 Chrome/Edge。若要在源码目录单独运行测试，先执行 `pnpm install`。
 
 ### 第 2 步：装进 DSH
@@ -104,12 +109,12 @@ plugin_manager remove_bundle target=dsh-agent-browser-auto     # 再移除
 
 审计/调试数据不会自动删除，如需清理：删掉 `~/.dsh/storages/agent-browser-auto/` 即可。
 
-## 工具面（22 个）
+## 工具面（24 个）
 
 | 工具 | 作用 | 说明 |
 |---|---|---|
 | `browser_agent_ensure` | **专用实例保障** | 探测 `127.0.0.1:<dedicatedBrowser.port>`（默认 9333），未监听才按配置拉起浏览器并轮询端口；无参数，端口/profile 只认配置。不做 CDP 连接，连接仍走 `browser_backend connect` |
-| `browser_backend` | 查询/切换浏览器后端 | `status` / `launch` / `connect` / `embedded` / `disconnect`；按 Agent 会话生效，绝不自动切换 |
+| `browser_backend` | 查询/切换浏览器后端 | `status` / `launch` / `connect` / `extension` / `embedded` / `disconnect`；按 Agent 会话生效，绝不自动切换 |
 | `browser_open` | 打开 URL 并回快照 | `newTab` 可在当前后端新开一页 |
 | `browser_snapshot` | 重拍快照 | `maxElements`（默认 80）/`text`（默认 false，最省 token）/`textLimit`（默认 3000）/`scope`（默认 `viewport`） |
 | `browser_wait` | 等条件成立后回快照 | `text` / `selector` / `url` 三选一；`state:"hidden"` 等消失；`timeoutMs` 默认 10000 |
@@ -125,11 +130,18 @@ plugin_manager remove_bundle target=dsh-agent-browser-auto     # 再移除
 | `browser_deep_snapshot` | **深度模式**：CDP 读 a11y 树 | 能看闭 shadow root / 跨源 iframe；需重启开调试端口（见下节），默认关闭 |
 | `browser_screenshot` | PNG 落盘 | 返回绝对路径，可直接 `read_image` |
 | `browser_tabs` | list/new/switch/close | 面板内多页，每个页面独立 guest |
-| `browser_tab_front` | **真实实例标签管理** | `list` 列出已连接实例的全部标签（含非本会话登记页）；`activate`（`index`/`urlMatch` 二选一）把标签切到前台**并重绑会话活动页**，后续 snapshot/click 直接作用于它；轻量内嵌回 `NOT_SUPPORTED`，真实后端未连接回 `REAL_BACKEND_REQUIRED` |
+| `browser_tab_front` | **真实/扩展实例标签管理** | `list` 列出已连接实例的全部标签（含非本会话登记页）；`activate`（`index`/`urlMatch` 二选一）把标签切到前台**并重绑会话活动页**，后续 snapshot/click 直接作用于它；轻量内嵌回 `NOT_SUPPORTED`，真实后端未连接回 `REAL_BACKEND_REQUIRED`，扩展离线回 `EXTENSION_OFFLINE` |
 | `browser_console` | 页面控制台近况 | `console-message` 事件 + 页面 error 钩子 |
 | `browser_network` | 请求近况 | 主文档 navigation entry + fetch/XHR 包装 + Resource Timing 兜底 |
-| `browser_eval` | 执行 JS | **默认关闭**（`enableEval`） |
+| `browser_eval` | 执行 JS | **默认关闭**（`enableEval`）；扩展桥接模式一律 `NOT_SUPPORTED` |
 | `browser_close` | 释放页面 | 同时销毁 guest |
+| `browser_ext_pair` | **扩展桥接配对** | 生成一次性配对码 + 安装指引；`extensionBridge.enabled=false` 回 `EXTENSION_DISABLED` |
+| `browser_ext_status` | **扩展桥接状态** | `{enabled,listening,paired,connected,clientId,lastHeartbeatMs,pairPending}` |
+
+> **工具暴露截断（实测）**：宿主对每插件工具暴露存在约 16 个的截断，`BROWSER_TOOL_NAMES` 数组顺序
+> 即暴露优先级。`extensionBridge.enabled=true` 时 `browser_ext_pair`/`browser_ext_status` 会换进
+> 第 15/16 位（`browser_find`/`browser_deep_snapshot` 顺延出窗口，内嵌/真实模式仍可用）；
+> `enabled=false`（默认）时两个新工具排在尾部，对存量用户零影响。
 
 **三项能力的关键边界**：
 
@@ -202,6 +214,9 @@ stats: 1 elements, 74 chars, ~19 tokens (scope=viewport)
 | `dedicatedBrowser.browser` | `edge` | 拉起时优先的浏览器；可执行文件探测顺序恒为 `executablePath` → 注册表/常见路径 msedge → chrome |
 | `dedicatedBrowser.executablePath` | `""` | 显式指定浏览器可执行文件；空 = 自动探测 |
 | `dedicatedBrowser.spawnTimeoutMs` | `15000` | 拉起后端口轮询总期限（1000–120000ms），超时回 `PORT_TIMEOUT` |
+| `extensionBridge.enabled` | `false` | 扩展桥接后端开关；关闭时 WS 服务不启动、`browser_ext_pair` 回 `EXTENSION_DISABLED`、不注入 systemPrompt 约定 |
+| `extensionBridge.port` | `9335` | 扩展桥接 WS 端口（只绑 `127.0.0.1`，工具参数不能覆盖；0 = 内核随机分配，测试用）；改端口后扩展弹窗里也要填同一个 |
+| `extensionBridge.pairTimeoutMs` | `300000` | 一次性配对码有效期（5000–3600000ms），单次使用 |
 
 ## 深度模式（CDP，可选，默认关闭）
 
@@ -299,6 +314,60 @@ browser_backend {action:"connect", endpoint:"http://127.0.0.1:9333"}            
 （用 `browser_tabs`），真实后端未连接回 `REAL_BACKEND_REQUIRED`。
 
 
+## 扩展桥接后端（0.8.0，可选，默认关闭）
+
+用户反复要求的「直接连接我的本地浏览器」的最终形态：不开 CDP 调试端口（Chrome/Edge 136+ 已禁止默认
+profile 用 `--remote-debugging-port`）、没有 edge://inspect 授权弹窗、连接常驻。原理：用户在日常浏览器
+装一个 **MV3 扩展**（随插件包分发，`extension/` 目录），扩展主动连到插件 Host 的 loopback WebSocket
+（token 配对认证），agent 的 `browser_*` 工具经这条通道操作**用户日常浏览器里 agent 自己打开的真实标签页**。
+
+**配对三步（都在用户侧完成，agent 只生成配对码）**：
+
+1. 插件配置打开 `extensionBridge.enabled: true` 并重新 apply；
+2. agent 调 `browser_ext_pair` → 返回 8 位一次性配对码 + 安装指引；
+3. 用户照指引：`edge://extensions` 打开「开发人员模式」→「加载解压缩的扩展」选插件目录下的 `extension/`
+   → 点工具栏「DSH Agent 浏览器桥」图标 → 确认端口（默认 9335）→ 输入配对码 → 「配对」。
+
+配对成功后弹窗显示「已连接」；之后 agent `browser_backend {action:"extension"}` 即可切入。
+token（长效凭证）存在扩展本机 `chrome.storage.local`，浏览器重启自动重连，无需重复配对；
+扩展弹窗「清除配对」即撤销授权。
+
+**扩展与 SW 生命周期**：service worker 每 20s 发应用层心跳（Chrome/Edge 116+ 起 WS 活动重置 SW 的
+30s 休眠计时器，`manifest.minimum_chrome_version=116`）；另有 **offscreen 兜底文档**：每 15s 探活 SW，
+SW 被杀且无法唤醒时由 offscreen 接管同一条 WS（消息经 `chrome.runtime` 转交并唤醒 SW），
+SW 复活后自动交还。Host 侧同一 clientId 的重连会顶掉旧连接，断网重连自愈。
+
+**扩展模式的语义差异（刻意的，都是硬约束）**：
+
+- `browser_open` 只操作 **agent 自己的标签页**（复用/新建），绝不导航用户手头的其它标签页；
+  要接管已有标签必须显式 `browser_tab_front {action:"activate"}`（同时聚焦窗口并重绑会话）。
+- 点击/输入/按键走共享 pageAgent 的 **DOM 合成路径**（无 CDP 真实输入管线）；`@ref`/快照契约与内嵌
+  完全一致——pageAgent 是同一份代码（`extension/page-agent.js` 与 client.js 的标记块逐字节一致，
+  契约测试强制）。
+- `browser_screenshot` 用 `captureVisibleTab`：只支持视口截图，且要求 agent 标签在前台
+  （不在前台回 `SCREENSHOT_NEEDS_FRONT`，提示先 activate）；`fullPage` 不支持。
+- `browser_tabs`/`browser_console`/`browser_network`/`browser_eval` 在扩展模式回 `NOT_SUPPORTED`
+  （`browser_eval` 一律拒绝）；`chrome://`、Web Store 等受保护页面回 `NOT_INJECTABLE`。
+
+**权限用途（manifest 声明，全部只为本功能服务）**：
+
+| 权限 | 用途 |
+|---|---|
+| `tabs` | 列出/创建/激活/关闭标签页（`browser_open`/`browser_tab_front`） |
+| `scripting` + `host_permissions:<all_urls>` | 向**用户可见的普通网页**注入共享 pageAgent（快照/合成输入）；受保护页面无法注入 |
+| `storage` | 扩展本机保存 token/clientId/端口（不出本机） |
+| `offscreen` | KEEP_ALIVE 兜底文档持有 WS |
+| `alarms` | SW 休眠后的重连兜底闹钟 |
+
+**安全代价（重要）**：这条通道**有认证**（一次性配对码 + 长效 token，token 只存 SHA-256 于
+`<auditDir>/extension-paired.json`）、只绑 `127.0.0.1`、`port`/超时只认配置、工具参数不能覆盖。
+配对码 8 位无歧义字符、单次使用、默认 5 分钟过期；WS 消息与审计绝不记录 token 原文。
+扩展一旦配对，agent 对普通网页的操作能力等同于「用户亲自在页面上执行脚本」——所以配对码只应
+交给用户本人，扩展只应装在自己信任的浏览器 profile 里。
+
+**systemPrompt 注入**：`extensionBridge.enabled:true` 时注入一段简短约定（进入方式、离线绝不自动
+切换、不代输凭证），section `agent-browser-auto:extension-bridge`，文案在 locale `systemPrompt.extensionBridge`。
+
 ## 常见问题：双击 `.cmd` 弹「无法验证发布者 / 你确定要运行此软件吗」
 
 这是 Windows 的 **Mark of the Web（MOTW）**，不是插件的问题，也不是病毒告警。
@@ -354,9 +423,10 @@ JavaScript，没有任何编译产物或下载执行步骤。这也是本仓库�
 |---|---|---|
 | DSH 版本 | **0.2.1-rc.5**（0.6.0 实测） | 插件依赖 desktop 的 webview lease API 与 side-bar tab 槽位 |
 | 运行形态 | **仅桌面版**（Electron） | Web 端没有 `dshDesktop` 桥，tab 内只显示提示 |
-| 平台 | Windows（实测）· macOS / Linux 未验证 | 启动器是 Windows 专用；不用深度模式时无平台依赖 |
+| 平台 | Windows（实测）· macOS / Linux 未验证 | 启动器是 Windows 专用；不用深度模式/扩展桥接时无平台依赖 |
 | Node | ≥ 20 | 与 DSH 自带运行时一致 |
 | 真实浏览器 | 本机 Chrome 或 Edge | 仅真实模式需要；使用 `playwright-core`，不下载浏览器、不使用日常 profile |
+| 扩展桥接 | Chrome/Edge **≥ 116**（WS 心跳保活 SW） | 仅扩展模式需要；`manifest.minimum_chrome_version=116` |
 
 ## 审计与排障
 
@@ -405,6 +475,22 @@ JavaScript，没有任何编译产物或下载执行步骤。这也是本仓库�
 - 切回内嵌后 `browser_open` 与结构化快照正常；后端状态保持可查询。
 - 内嵌 DevTools 仅确认按钮与 API 调用路径，**没有确认窗口打开**；真实 Chrome 的 DevTools 由浏览器原生提供。
 
+### 0.8.0 自动化结果（2026-11-18）
+
+- 全量命令 **111 / 111 通过**（0.7.0 的 86 项全部保持 + 新增 25 项），Node v24.21.0 / Windows，
+  `node --test --test-concurrency=1`（命令见下「验证方法」）。
+- 新增覆盖：`test/extension-bridge.test.mjs` 12 项（真实 ws 服务绑随机端口 + Node 内建 WebSocket
+  客户端跑完整链路：配置默认/非法值、一次性配对码换取长效 token 且只落盘 SHA-256、错误/过期码 401、
+  命令往返 lossless、错误码回传、EXTENSION_OFFLINE/TIMEOUT/NO_CHANNEL、ping/pong、同 clientId 重连
+  顶掉旧连接、服务重启后 token 仍有效、端口占用退避、截图 base64 落盘摘除）；`test/page-agent-contract.test.mjs`
+  6 项（pageAgent 标记块逐字节一致、自包含约束、扩展页面 op ⊆ 共享函数、扩展命令表与内嵌 dispatch
+  对称、manifest 权限/模块 SW、offscreen 探活-接管-交还）；工具层 5 项 + 后端路由 2 项（extension 模式）。
+- `pnpm pack --dry-run --json` 通过：包含 `extension/*`（manifest/background/offscreen/pair/page-agent）
+  与 `lib/extension-bridge.js`，不含测试与临时文件。
+- **待 lead 真机验证**：① 扩展装入用户日常 Edge → `browser_ext_pair` 配对 → `browser_backend {action:"extension"}`
+  → `browser_open` 在日常 Edge 真实打开页面；② SW 休眠 5 分钟后命令自动唤醒（心跳保活）；
+  ③ 断网/杀 SW 后重连与 offscreen 接管/交还；④ 内嵌/real 后端回归不受影响；⑤ systemPrompt 扩展约定的实际注入。
+
 ### 0.7.0 自动化结果（2026-11-18）
 
 - 全量命令 **86 / 86 通过**（旧 68 项全部保持 + 新增 18 项），Node v24.21.0 / Windows，
@@ -426,8 +512,8 @@ JavaScript，没有任何编译产物或下载执行步骤。这也是本仓库�
 先执行 `pnpm install`，再在仓库根目录运行：
 
 ```powershell
-# 全量：单元 + 专用实例保障 + CDP + 默认真实 Chrome/Edge 操作链
-node --test --test-concurrency=1 test/snapshot.test.mjs test/tools.test.mjs test/backend.test.mjs test/dedicated.test.mjs test/cdp.test.mjs test/real-driver.test.mjs test/real-driver-cdp.test.mjs
+# 全量：单元 + 专用实例保障 + CDP + 扩展桥接 + 共享契约 + 默认真实 Chrome/Edge 操作链
+node --test --test-concurrency=1 test/snapshot.test.mjs test/tools.test.mjs test/backend.test.mjs test/dedicated.test.mjs test/cdp.test.mjs test/extension-bridge.test.mjs test/page-agent-contract.test.mjs test/real-driver.test.mjs test/real-driver-cdp.test.mjs
 
 # 指定 Edge 复测真实后端与 CDP 附加
 $env:REAL_BROWSER = 'edge'

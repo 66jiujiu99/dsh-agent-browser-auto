@@ -1,0 +1,1009 @@
+/**
+ * 页面代理（共享契约源，0.8.0）：Host 下发的 op 在**用户日常浏览器的真实标签页**里执行。
+ *
+ * 本文件是快照/操作逻辑的唯一权威实现：extension/background.js 通过
+ * `chrome.scripting.executeScript({ world:'MAIN', func: pageAgent, args })` 注入执行；
+ * client.js（轻量内嵌）持有同一份逐字节副本（标记块之间），
+ * test/page-agent-contract.test.mjs 强制两份一致，防止两套后端的输出契约漂移。
+ * PROTOCOL.md §2.1/§2.2 是这些结构的最终契约。
+ *
+ * 约束：函数必须自包含（不引用本文件任何其它变量、不用 import），
+ * 因为它会被 toString() 序列化后注入页面；返回值必须是可结构化克隆的。
+ */
+
+// [PAGE_AGENT_BEGIN] —— 本块与 client.js 的标记块逐字节一致（仅多 export 前缀）。
+    export function pageAgent(op, args) {
+      var S = window.__dshAgent;
+      if (!S) {
+        S = window.__dshAgent = {
+          refs: new Map(),
+          sigs: new Map(),
+          seq: 0,
+          mutations: 0,
+          net: [],
+          consoleErrors: [],
+          installed: false,
+        };
+      }
+      if (!S.sigs) S.sigs = new Map();
+      function installObservers() {
+        if (S.obsInstalled || !document.documentElement) return;
+        S.obsInstalled = true;
+        try {
+          var obs = new MutationObserver(function (records) {
+            S.mutations += records.length;
+          });
+          obs.observe(document.documentElement, {
+            subtree: true,
+            childList: true,
+            attributes: true,
+            characterData: true,
+          });
+        } catch (e) { /* 忽略 */ }
+      }
+      installObservers();
+
+      var INTERACTIVE = [
+        'a[href]', 'button', 'input:not([type=hidden])', 'select', 'textarea', 'summary',
+        '[role=button]', '[role=link]', '[role=tab]', '[role=menuitem]', '[role=menuitemcheckbox]',
+        '[role=checkbox]', '[role=radio]', '[role=combobox]', '[role=switch]', '[role=slider]',
+        '[role=option]', '[role=searchbox]', '[contenteditable=""]', '[contenteditable=true]',
+        '[tabindex]:not([tabindex="-1"])', 'audio[controls]', 'video[controls]', 'label[for]',
+        '[onclick]',
+      ].join(',');
+
+      function isVisible(el) {
+        if (!el || !el.getBoundingClientRect) return false;
+        var rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        if (typeof el.checkVisibility === 'function') {
+          if (!el.checkVisibility({ opacityProperty: true, visibilityProperty: true, checkOpacity: false })) return false;
+        } else {
+          var style = window.getComputedStyle(el);
+          if (style.visibility === 'hidden' || style.display === 'none') return false;
+        }
+        return true;
+      }
+
+      function textOf(node) {
+        var value = node.textContent || '';
+        return value.replace(/\s+/g, ' ').trim();
+      }
+
+      /** 去掉图标字体用的私用区字形与零宽字符——它们只占 token，不携带任何语义。 */
+      function cleanName(value) {
+        return String(value == null ? '' : value)
+          .replace(/[\uE000-\uF8FF\u200B-\u200F\u2028\u2029\uFEFF]/g, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+      }
+
+      function nameOf(el) {
+        var candidates = [
+          el.getAttribute && el.getAttribute('aria-label'),
+          el.getAttribute && el.getAttribute('placeholder'),
+          el.getAttribute && el.getAttribute('alt'),
+          el.getAttribute && el.getAttribute('title'),
+        ];
+        for (var i = 0; i < candidates.length; i += 1) {
+          var named = cleanName(candidates[i]);
+          if (named) return named.slice(0, 100);
+        }
+        if (el.tagName === 'INPUT') {
+          var type = (el.type || '').toLowerCase();
+          if (type === 'submit' || type === 'button' || type === 'reset') {
+            var buttonLabel = cleanName(el.value);
+            if (buttonLabel) return buttonLabel.slice(0, 100);
+          }
+        }
+        if (el.id) {
+          var labelled = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+          if (labelled) {
+            var labelText = cleanName(textOf(labelled));
+            if (labelText) return labelText.slice(0, 100);
+          }
+        }
+        var parentLabel = el.closest && el.closest('label');
+        if (parentLabel && parentLabel !== el) {
+          var parentText = cleanName(textOf(parentLabel));
+          if (parentText) return parentText.slice(0, 100);
+        }
+        var text = cleanName(textOf(el));
+        if (text) return text.slice(0, 100);
+        if (el.value && typeof el.value === 'string') return cleanName(el.value).slice(0, 100);
+        if (el.tagName === 'IMG') return '';
+        return '';
+      }
+
+      function roleOf(el) {
+        var explicit = el.getAttribute && el.getAttribute('role');
+        if (explicit) return explicit;
+        var tag = el.tagName;
+        if (tag === 'A') return 'link';
+        if (tag === 'BUTTON') return 'button';
+        if (tag === 'SELECT') return 'combobox';
+        if (tag === 'TEXTAREA') return 'textarea';
+        if (tag === 'SUMMARY') return 'button';
+        if (tag === 'LABEL') return 'other';
+        if (tag === 'INPUT') {
+          var type = (el.type || 'text').toLowerCase();
+          if (type === 'checkbox') return 'checkbox';
+          if (type === 'radio') return 'radio';
+          if (type === 'submit' || type === 'button' || type === 'reset' || type === 'image') return 'button';
+          if (type === 'search') return 'searchbox';
+          if (type === 'range') return 'slider';
+          return 'textbox';
+        }
+        return 'other';
+      }
+
+      function refFor(el) {
+        var existing = S.byEl && S.byEl.get(el);
+        if (existing) return existing;
+        S.seq += 1;
+        var ref = '@e' + S.seq;
+        S.refs.set(ref, el);
+        if (!S.byEl) S.byEl = new WeakMap();
+        S.byEl.set(el, ref);
+        return ref;
+      }
+
+      function pruneRefs() {
+        S.refs.forEach(function (el, ref) {
+          if (!el || !el.isConnected) {
+            S.refs.delete(ref);
+            if (S.byEl) S.byEl.delete(el);
+          }
+        });
+      }
+
+      /**
+       * 收集可交互元素：穿透 open shadow root 与**同源** iframe。
+       * 每收集到一个元素，记下它的 frame 链（外→内），供坐标换算用。
+       * 跨源 iframe 拿不到 contentDocument，跳过（并在快照里报数量）。
+       */
+      var frameChain = new WeakMap();
+      var frameStats = { shadowRoots: 0, sameOriginFrames: 0, blockedFrames: 0 };
+
+      function walkInteractive(root, out, chain) {
+        if (!root || !root.querySelectorAll) return;
+        var nodes = root.querySelectorAll(INTERACTIVE);
+        for (var i = 0; i < nodes.length; i += 1) out.push(nodes[i]);
+        var all = root.querySelectorAll('*');
+        for (var j = 0; j < all.length; j += 1) {
+          var shadow = all[j].shadowRoot;
+          if (shadow) {
+            frameStats.shadowRoots += 1;
+            walkInteractive(shadow, out, chain);
+          }
+        }
+        var frames = root.querySelectorAll('iframe,frame');
+        for (var k = 0; k < frames.length; k += 1) {
+          var frame = frames[k];
+          var doc = null;
+          try { doc = frame.contentDocument; } catch (e) { doc = null; }
+          if (!doc || !doc.documentElement) { frameStats.blockedFrames += 1; continue; }
+          frameStats.sameOriginFrames += 1;
+          var nextChain = chain.concat([frame]);
+          frameChain.set(frame, chain);
+          walkInteractive(doc, out, nextChain);
+          // 记录该 iframe 内元素对应的链：先记 frame 自身，元素在下面按 chain 取。
+          var inner = doc.querySelectorAll('*');
+          for (var m = 0; m < inner.length; m += 1) frameChain.set(inner[m], nextChain);
+        }
+      }
+
+      function collectInteractive() {
+        frameStats = { shadowRoots: 0, sameOriginFrames: 0, blockedFrames: 0 };
+        var out = [];
+        walkInteractive(document, out, []);
+        // document 本身的元素（含 shadow 里的）链为空数组：walkInteractive 已按层写入。
+        for (var i = 0; i < out.length; i += 1) {
+          if (!frameChain.has(out[i])) frameChain.set(out[i], []);
+        }
+        return out;
+      }
+
+      /** 元素在**顶层视口**里的中点坐标（穿透同源 iframe 的偏移）。 */
+      function viewportCenter(el) {
+        var rect = el.getBoundingClientRect();
+        var left = rect.left;
+        var top = rect.top;
+        var chain = frameChain.get(el) || [];
+        for (var i = 0; i < chain.length; i += 1) {
+          var frameRect = chain[i].getBoundingClientRect();
+          left += frameRect.left + (chain[i].clientLeft || 0);
+          top += frameRect.top + (chain[i].clientTop || 0);
+        }
+        return { left: left, top: top, width: rect.width, height: rect.height };
+      }
+
+      function rectOf(el) {
+        var box = viewportCenter(el);
+        return {
+          x: box.left + window.scrollX,
+          y: box.top + window.scrollY,
+          width: box.width,
+          height: box.height,
+          viewportX: box.left + box.width / 2,
+          viewportY: box.top + box.height / 2,
+        };
+      }
+
+      /**
+       * 收集「读不到内容但能点」的区域（跨源 iframe / canvas / embed / object）。
+       * 给模型矩形，让它能用坐标点或判断「这里需要截图」。
+       */
+      function collectOpaque() {
+        var out = [];
+        function scan(doc) {
+          var list = doc.querySelectorAll('iframe,frame,canvas,embed,object');
+          for (var i = 0; i < list.length; i += 1) {
+            var el = list[i];
+            if (!isVisible(el)) continue;
+            var kind = el.tagName.toLowerCase();
+            var crossOrigin = false;
+            if (kind === 'iframe' || kind === 'frame') {
+              try { crossOrigin = !el.contentDocument; } catch (e) { crossOrigin = true; }
+              if (!crossOrigin) continue; // 同源 iframe 已展开成元素，不用再报告
+            }
+            var box = viewportCenter(el);
+            var label = el.getAttribute('title') || el.getAttribute('name') || el.getAttribute('aria-label') || '';
+            out.push({
+              kind: kind,
+              x: Math.round(box.left),
+              y: Math.round(box.top),
+              width: Math.round(box.width),
+              height: Math.round(box.height),
+              name: String(label).slice(0, 60),
+            });
+          }
+          var frames = doc.querySelectorAll('iframe,frame');
+          for (var j = 0; j < frames.length; j += 1) {
+            var inner = null;
+            try { inner = frames[j].contentDocument; } catch (e) { inner = null; }
+            if (inner && inner.documentElement) scan(inner);
+          }
+        }
+        scan(document);
+        return out;
+      }
+
+      // 视口过滤：viewport 只保留与视口相交的元素（几何信息只有在页面里才拿得到），
+      // document 保留现在的行为（全部可见元素）。offscreen 记录视口外被丢掉的元素数，
+      // 让模型知道「还有东西在屏幕外」，不至于以为页面就这些。
+      // 正文默认不发（text 默认 false）——多步任务里正文是最大成本，用户要看时显式传 text:true。
+      function snapshot(options) {
+        var opts = options || {};
+        var maxElements = typeof opts.maxElements === 'number' && opts.maxElements > 0 ? opts.maxElements : 80;
+        var textLimit = typeof opts.textLimit === 'number' && opts.textLimit > 0 ? opts.textLimit : 3000;
+        var scope = opts.scope === 'document' ? 'document' : 'viewport';
+        var wantText = opts.text === true;
+        pruneRefs();
+        var elements = [];
+        var offscreen = 0;
+        var nodes = collectInteractive();
+        var truncatedElements = false;
+        for (var i = 0; i < nodes.length; i += 1) {
+          if (elements.length >= maxElements) { truncatedElements = true; break; }
+          var el = nodes[i];
+          if (!isVisible(el)) continue;
+          var box = viewportCenter(el);
+          var inView = box.top + box.height > 0 && box.top < window.innerHeight
+            && box.left + box.width > 0 && box.left < window.innerWidth;
+          if (scope === 'viewport' && !inView) { offscreen += 1; continue; }
+          var role = roleOf(el);
+          var item = { ref: refFor(el), role: role, name: nameOf(el) };
+          item.inViewport = inView;
+          S.sigs.set(item.ref, { role: item.role, name: item.name });
+          if (role === 'link') {
+            var href = el.getAttribute('href') || '';
+            if (href) item.href = href.slice(0, 100);
+          }
+          if (role === 'textbox' || role === 'searchbox' || role === 'textarea' || role === 'combobox') {
+            var value = typeof el.value === 'string' ? el.value : '';
+            if (value) item.value = value.slice(0, 200);
+            if (el.getAttribute && el.getAttribute('placeholder')) item.placeholder = String(el.getAttribute('placeholder')).slice(0, 120);
+          }
+          if (role === 'checkbox' || role === 'radio' || role === 'switch') item.checked = !!el.checked;
+          if (el.disabled) item.disabled = true;
+          elements.push(item);
+        }
+        // 正文默认不发（text:false）：返回空串而不是 null，保持输出 schema 是单一 string 类型。
+        var text = '';
+        var truncatedText = false;
+        if (wantText) {
+          try {
+            text = (document.body ? document.body.innerText : '') || '';
+            text = text.replace(/[ \t\u00a0]+/g, ' ').replace(/\n\s*\n\s*\n+/g, '\n\n').trim();
+          } catch (e) { text = ''; }
+          truncatedText = text.length > textLimit;
+          if (truncatedText) text = text.slice(0, textLimit) + '\n…';
+        }
+        return {
+          pageId: opts.pageId || '',
+          url: location.href,
+          title: document.title || '',
+          scope: scope,
+          offscreen: offscreen,
+          scroll: {
+            y: Math.round(window.scrollY),
+            height: Math.round(document.documentElement ? document.documentElement.scrollHeight : 0),
+            viewport: window.innerHeight,
+          },
+          text: text,
+          elements: elements,
+          opaque: collectOpaque(),
+          frames: {
+            shadowRoots: frameStats.shadowRoots,
+            sameOrigin: frameStats.sameOriginFrames,
+            crossOrigin: frameStats.blockedFrames,
+          },
+          truncated: { text: truncatedText, elements: truncatedElements },
+        };
+      }
+
+      function resolve(ref) {
+        var el = S.refs.get(ref);
+        if (!el || !el.isConnected) return null;
+        return el;
+      }
+
+      /**
+       * 按 ref 找元素；ref 失效（SPA 重渲染把节点换掉了）时按「角色 + 名字」找同一个语义元素，
+       * 并给它分配一个新 ref 返回。这是 R1.2「ref 稳定」在页面变化后的自愈路径。
+       */
+      function resolveLoose(ref) {
+        var el = resolve(ref);
+        if (el) return { el: el, ref: ref, recovered: false };
+        var sig = S.sigs.get(ref);
+        if (!sig) return null;
+        var nodes = collectInteractive();
+        for (var i = 0; i < nodes.length; i += 1) {
+          var candidate = nodes[i];
+          if (!isVisible(candidate)) continue;
+          if (roleOf(candidate) !== sig.role) continue;
+          if (nameOf(candidate) !== sig.name) continue;
+          return { el: candidate, ref: refFor(candidate), recovered: true };
+        }
+        return null;
+      }
+
+      function foldText(value, limit) {
+        return String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit || 200);
+      }
+
+      function optionCandidate(el, native, index) {
+        var label = native ? (el.label || el.text || textOf(el)) : textOf(el);
+        var value = '';
+        if (native) value = String(el.value == null ? '' : el.value);
+        else if (el.getAttribute('value') !== null) value = String(el.getAttribute('value'));
+        else if (el.getAttribute('data-value') !== null) value = String(el.getAttribute('data-value'));
+        return { el: el, label: foldText(label, 200), value: value, index: index };
+      }
+
+      function optionNotFound(candidates) {
+        var shown = [];
+        for (var i = 0; i < Math.min(candidates.length, 8); i += 1) {
+          var item = candidates[i];
+          shown.push('[' + item.index + '] ' + JSON.stringify(item.label)
+            + (item.value !== '' ? ' value=' + JSON.stringify(item.value) : ''));
+        }
+        return {
+          ok: false,
+          code: 'OPTION_NOT_FOUND',
+          message: '找不到匹配选项；候选（最多 8 个）: ' + (shown.join(' | ') || '（无）'),
+        };
+      }
+
+      function insideOptionContainer(el) {
+        var node = el;
+        while (node) {
+          if (node.getAttribute) {
+            var role = node.getAttribute('role');
+            if (role === 'listbox' || role === 'menu') return true;
+            var marker = String(node.getAttribute('class') || '') + ' ' + String(node.getAttribute('id') || '');
+            var tokens = marker.toLowerCase().split(/\s+/);
+            for (var i = 0; i < tokens.length; i += 1) {
+              if (/(?:^|[-_])(dropdown|select|select2|ant-select|el-select)(?:[-_]|$)/.test(tokens[i])) return true;
+            }
+          }
+          if (node.parentElement) node = node.parentElement;
+          else {
+            var root = node.getRootNode && node.getRootNode();
+            node = root && root.host ? root.host : null;
+          }
+        }
+        return false;
+      }
+
+      function collectOptionCandidates() {
+        var out = [];
+        function scan(root) {
+          if (!root || !root.querySelectorAll) return;
+          var nodes = root.querySelectorAll('[role=option],[role=menuitem],[role=menuitemradio],[role=menuitemcheckbox],li');
+          for (var i = 0; i < nodes.length; i += 1) {
+            var role = nodes[i].getAttribute('role');
+            var explicitOption = role === 'option' || role === 'menuitem' || role === 'menuitemradio' || role === 'menuitemcheckbox';
+            if (nodes[i].tagName === 'LI' && !explicitOption && !insideOptionContainer(nodes[i])) continue;
+            if (isVisible(nodes[i])) out.push(optionCandidate(nodes[i], false, out.length));
+          }
+          var all = root.querySelectorAll('*');
+          for (var j = 0; j < all.length; j += 1) {
+            if (all[j].shadowRoot) scan(all[j].shadowRoot);
+          }
+          var frames = root.querySelectorAll('iframe,frame');
+          for (var k = 0; k < frames.length; k += 1) {
+            var doc = null;
+            try { doc = frames[k].contentDocument; } catch (e) { doc = null; }
+            if (doc && doc.documentElement) scan(doc);
+          }
+        }
+        scan(document);
+        return out;
+      }
+
+      async function selectCustomOption(found, args, kind) {
+        try {
+          if (typeof found.el.scrollIntoView === 'function') found.el.scrollIntoView({ block: 'center', inline: 'center' });
+          found.el.click();
+        } catch (e) {
+          return { ok: false, code: 'INTERNAL', message: '打开下拉框失败: ' + String(e && e.message ? e.message : e) };
+        }
+        // 给常见 React/Vue 下拉一次渲染窗口；executeJavaScript 会等待这个 Promise。
+        await new Promise(function (resolve) { setTimeout(resolve, 180); });
+        var candidates = collectOptionCandidates();
+        if (candidates.length === 0) {
+          var popup = found.el.getAttribute && found.el.getAttribute('aria-haspopup');
+          if (roleOf(found.el) === 'combobox' || popup === 'listbox' || popup === 'menu' || popup === 'true') {
+            return optionNotFound(candidates);
+          }
+          return { ok: false, code: 'NOT_SELECT', message: '目标不是原生 select，点击后也没有可见下拉选项' };
+        }
+        var picked = null;
+        if (kind === 'index') {
+          if (args.index >= 0 && args.index < candidates.length) picked = candidates[args.index];
+        } else if (kind === 'value') {
+          var wantedValue = String(args.value);
+          for (var i = 0; i < candidates.length; i += 1) {
+            var valueAttr = candidates[i].el.getAttribute('value');
+            var dataValue = candidates[i].el.getAttribute('data-value');
+            if ((valueAttr !== null && String(valueAttr) === wantedValue)
+              || (dataValue !== null && String(dataValue) === wantedValue)) {
+              picked = candidates[i];
+              break;
+            }
+          }
+        } else {
+          var wantedLabel = foldText(args.label, 200);
+          for (var j = 0; j < candidates.length; j += 1) {
+            if (candidates[j].label === wantedLabel) { picked = candidates[j]; break; }
+          }
+          if (!picked) {
+            var partial = [];
+            for (var k = 0; k < candidates.length; k += 1) {
+              if (wantedLabel !== '' && candidates[k].label.indexOf(wantedLabel) >= 0) partial.push(candidates[k]);
+            }
+            if (partial.length === 1) picked = partial[0];
+          }
+        }
+        if (!picked) return optionNotFound(candidates);
+        try {
+          picked.el.click();
+        } catch (e) {
+          return { ok: false, code: 'INTERNAL', message: '点击下拉选项失败: ' + String(e && e.message ? e.message : e) };
+        }
+        return {
+          ok: true,
+          ref: found.ref,
+          selected: { value: picked.value, label: picked.label, index: picked.index },
+          changed: true,
+        };
+      }
+
+      function installDialogHandlers() {
+        if (S.dialogsInstalled) return;
+        S.dialogsInstalled = true;
+        var originals = S.dialogOriginals = {
+          alert: window.alert,
+          confirm: window.confirm,
+          prompt: window.prompt,
+        };
+        function wrap(type, original) {
+          return function (message, defaultValue) {
+            var armed = S.dialogResponse;
+            if (!armed) return original.apply(this, arguments);
+            S.dialogResponse = null;
+            var promptText = null;
+            if (type === 'prompt' && armed.action === 'accept') {
+              promptText = typeof armed.promptText === 'string'
+                ? armed.promptText
+                : String(defaultValue == null ? '' : defaultValue);
+            }
+            S.lastDialog = {
+              type: type,
+              message: String(message == null ? '' : message),
+              action: armed.action,
+              promptText: promptText,
+              at: Date.now(),
+            };
+            if (type === 'alert') return undefined;
+            if (type === 'confirm') return armed.action === 'accept';
+            return armed.action === 'accept' ? promptText : null;
+          };
+        }
+        window.alert = wrap('alert', originals.alert);
+        window.confirm = wrap('confirm', originals.confirm);
+        window.prompt = wrap('prompt', originals.prompt);
+      }
+
+      switch (op) {
+        case 'install': {
+          installDialogHandlers();
+          if (!S.installed) {
+            S.installed = true;
+            try {
+              var originalFetch = window.fetch;
+              window.fetch = function () {
+                var input = arguments[0];
+                var url = typeof input === 'string' ? input : (input && input.url) || '';
+                var promise = originalFetch.apply(this, arguments);
+                promise.then(function (response) {
+                  S.net.push({ url: String(url).slice(0, 300), status: response.status, ok: response.ok });
+                  if (S.net.length > 400) S.net.splice(0, S.net.length - 400);
+                }, function (error) {
+                  S.net.push({ url: String(url).slice(0, 300), ok: false, failure: String(error && error.message ? error.message : error) });
+                  if (S.net.length > 400) S.net.splice(0, S.net.length - 400);
+                });
+                return promise;
+              };
+              var open = XMLHttpRequest.prototype.open;
+              var send = XMLHttpRequest.prototype.send;
+              XMLHttpRequest.prototype.open = function (method, url) {
+                this.__dshUrl = String(url || '');
+                this.__dshMethod = String(method || 'GET');
+                return open.apply(this, arguments);
+              };
+              XMLHttpRequest.prototype.send = function () {
+                var xhr = this;
+                xhr.addEventListener('loadend', function () {
+                  S.net.push({ url: xhr.__dshUrl.slice(0, 300), method: xhr.__dshMethod, status: xhr.status, ok: xhr.status >= 200 && xhr.status < 400 });
+                  if (S.net.length > 400) S.net.splice(0, S.net.length - 400);
+                });
+                return send.apply(this, arguments);
+              };
+              window.addEventListener('error', function (event) {
+                S.consoleErrors.push({ level: 'error', text: String(event.message || 'error').slice(0, 500) });
+              });
+            } catch (e) { /* 忽略：注入失败不影响主流程 */ }
+          }
+          return { ok: true };
+        }
+        case 'snapshot':
+          return snapshot(args || {});
+        case 'find': {
+          // 全文档（含 shadow / 同源 iframe）按名字或当前值搜索，返回 ref；
+          // 解决「元素在视口外/没列出来，但我就想找到它」的场景，不用整页快照。
+          var needle = String(args.text || '').toLowerCase();
+          if (needle === '') return { ok: false, code: 'BAD_ARG', message: 'find 需要 text' };
+          var limit = typeof args.limit === 'number' && args.limit > 0 ? Math.min(args.limit, 50) : 20;
+          var pool = collectInteractive();
+          var matches = [];
+          for (var fi = 0; fi < pool.length; fi += 1) {
+            var fel = pool[fi];
+            if (!isVisible(fel)) continue;
+            var fname = nameOf(fel);
+            var fval = fel && typeof fel.value === 'string' ? fel.value : '';
+            var hay = (fname + ' ' + fval).toLowerCase();
+            if (hay.indexOf(needle) < 0) continue;
+            var fbox = viewportCenter(fel);
+            matches.push({
+              ref: refFor(fel),
+              role: roleOf(fel),
+              name: fname,
+              inViewport: fbox.top + fbox.height > 0 && fbox.top < window.innerHeight
+                && fbox.left + fbox.width > 0 && fbox.left < window.innerWidth,
+            });
+            if (matches.length >= limit) break;
+          }
+          if (matches.length > 0) {
+            var first = S.refs.get(matches[0].ref);
+            try { if (first && first.scrollIntoView) first.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) { /* 忽略 */ }
+          }
+          // 兜底：没有语义元素命中时，扫描全部元素（含 shadow/同源 iframe），
+          // 找「文字包含关键词的最小可见元素」，给坐标让模型用 browser_click x/y 点。
+          if (matches.length === 0) {
+            var all = [];
+            (function collectAll(root) {
+              if (!root || !root.querySelectorAll) return;
+              var list = root.querySelectorAll('*');
+              for (var ai = 0; ai < list.length; ai += 1) all.push(list[ai]);
+              for (var aj = 0; aj < list.length; aj += 1) {
+                if (list[aj].shadowRoot) collectAll(list[aj].shadowRoot);
+              }
+            })(document);
+            var best = null;
+            var bestArea = Infinity;
+            for (var bi = 0; bi < all.length; bi += 1) {
+              var bel = all[bi];
+              if (!isVisible(bel)) continue;
+              var btxt = textOf(bel).toLowerCase();
+              if (btxt === '' || btxt.indexOf(needle) < 0) continue;
+              var bbox = viewportCenter(bel);
+              var area = bbox.width * bbox.height;
+              if (area <= 0 || area > 400000) continue;
+              if (area < bestArea) { best = bel; bestArea = area; }
+            }
+            if (best !== null) {
+              var gbox = viewportCenter(best);
+              try { best.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) { /* 忽略 */ }
+              gbox = viewportCenter(best);
+              matches.push({
+                ref: '',
+                role: 'element',
+                name: textOf(best).slice(0, 120),
+                inViewport: true,
+                x: Math.round(gbox.left + gbox.width / 2),
+                y: Math.round(gbox.top + gbox.height / 2),
+                fallback: true,
+              });
+            }
+          }
+          return { ok: true, query: String(args.text), matches: matches };
+        }
+        case 'state': {
+          var active = document.activeElement;
+          return {
+            url: location.href,
+            title: document.title || '',
+            mutations: S.mutations,
+            scrollY: Math.round(window.scrollY),
+            textLength: document.body ? document.body.innerText.length : 0,
+            activeRef: active && S.byEl ? S.byEl.get(active) || null : null,
+          };
+        }
+        case 'waitProbe': {
+          var waitState = args.state === 'hidden' ? 'hidden' : 'visible';
+          var waitUrl = location.href;
+          var waitMatched = false;
+          if (typeof args.url === 'string') {
+            // URL 条件只看当前地址，state 对 URL 不适用。
+            waitMatched = waitUrl.indexOf(args.url) >= 0;
+          } else if (typeof args.selector === 'string') {
+            var waitElement = null;
+            try {
+              // 主文档 selector；不可用选择器必须让调用方立即知道。
+              waitElement = document.querySelector(args.selector);
+            } catch (e) {
+              return {
+                ok: false,
+                code: 'INVALID_SELECTOR',
+                message: String(e && e.message ? e.message : e),
+              };
+            }
+            var waitVisible = !!waitElement && isVisible(waitElement);
+            waitMatched = waitState === 'hidden' ? !waitVisible : waitVisible;
+          } else if (typeof args.text === 'string') {
+            var waitBodyText = '';
+            try {
+              // innerText 只包含可见正文，不包含 display:none 等隐藏文本。
+              waitBodyText = String(document.body ? document.body.innerText || '' : '');
+            } catch (e) {
+              waitBodyText = '';
+            }
+            var waitTextFound = waitBodyText.indexOf(args.text) >= 0;
+            waitMatched = waitState === 'hidden' ? !waitTextFound : waitTextFound;
+          }
+          return { ok: true, matched: waitMatched, url: waitUrl };
+        }
+        case 'rect': {
+          var found = resolveLoose(args.ref);
+          if (!found) return { ok: false, code: 'NO_REF' };
+          var element = found.el;
+          if (!isVisible(element)) {
+            try { element.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) { /* 忽略 */ }
+          }
+          var rect = rectOf(element);
+          var vw = window.innerWidth;
+          var vh = window.innerHeight;
+          if (rect.viewportX < 0 || rect.viewportY < 0 || rect.viewportX > vw || rect.viewportY > vh) {
+            try { element.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) { /* 忽略 */ }
+            rect = rectOf(element);
+          }
+          return {
+            ok: true,
+            ref: found.ref,
+            recovered: found.recovered,
+            rect: { x: rect.viewportX, y: rect.viewportY, width: rect.width, height: rect.height },
+          };
+        }
+        case 'clickDom': {
+          var foundClick = resolveLoose(args.ref);
+          if (!foundClick) return { ok: false, code: 'NO_REF' };
+          var clickEl = foundClick.el;
+          try {
+            if (typeof clickEl.scrollIntoView === 'function') clickEl.scrollIntoView({ block: 'center', inline: 'center' });
+            clickEl.focus({ preventScroll: true });
+          } catch (e) { /* 忽略 */ }
+          var before = { mutations: S.mutations, url: location.href };
+          try {
+            clickEl.click();
+          } catch (e) {
+            return { ok: false, code: 'INTERNAL', message: String(e && e.message ? e.message : e) };
+          }
+          return { ok: true, ref: foundClick.ref, recovered: foundClick.recovered, before: before };
+        }
+        case 'clickAt': {
+          var hit = document.elementFromPoint(args.x, args.y);
+          if (!hit) return { ok: false, code: 'NO_REF', message: '该坐标没有元素' };
+          try { hit.click(); } catch (e) { return { ok: false, code: 'INTERNAL', message: String(e) }; }
+          return { ok: true, tag: hit.tagName, text: foldText(hit.textContent, 60) };
+        }
+        case 'focus': {
+          var foundFocus = resolveLoose(args.ref);
+          if (!foundFocus) return { ok: false, code: 'NO_REF' };
+          var focusEl = foundFocus.el;
+          try {
+            focusEl.scrollIntoView({ block: 'center', inline: 'center' });
+            focusEl.focus({ preventScroll: true });
+          } catch (e) { /* 忽略 */ }
+          var isEditable = focusEl.isContentEditable || focusEl.tagName === 'INPUT' || focusEl.tagName === 'TEXTAREA';
+          if (args.clear && !focusEl.isContentEditable) {
+            try { focusEl.select(); } catch (e) { /* 忽略 */ }
+          }
+          if (args.clear && focusEl.isContentEditable) {
+            try {
+              var range = document.createRange();
+              range.selectNodeContents(focusEl);
+              var selection = window.getSelection();
+              selection.removeAllRanges();
+              selection.addRange(range);
+            } catch (e) { /* 忽略 */ }
+          }
+          return {
+            ok: true,
+            ref: foundFocus.ref,
+            recovered: foundFocus.recovered,
+            editable: isEditable,
+            readOnly: !!focusEl.readOnly,
+            value: focusEl.isContentEditable ? foldText(focusEl.textContent, 400) : String(focusEl.value ?? ''),
+            maxLength: focusEl.maxLength && focusEl.maxLength > 0 ? focusEl.maxLength : null,
+          };
+        }
+        case 'typeFallback': {
+          var typeEl = resolve(args.ref);
+          if (!typeEl) return { ok: false, code: 'NO_REF' };
+          var text = String(args.text ?? '');
+          try {
+            typeEl.focus({ preventScroll: true });
+            if (typeEl.isContentEditable) {
+              if (args.clear !== false) {
+                var clearRange = document.createRange();
+                clearRange.selectNodeContents(typeEl);
+                var clearSel = window.getSelection();
+                clearSel.removeAllRanges();
+                clearSel.addRange(clearRange);
+                document.execCommand('delete');
+              }
+              document.execCommand('insertText', false, text);
+            } else {
+              var proto = typeEl.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+              var setter = Object.getOwnPropertyDescriptor(proto, 'value');
+              if (setter && setter.set) setter.set.call(typeEl, text);
+              else typeEl.value = text;
+              typeEl.dispatchEvent(new Event('input', { bubbles: true }));
+              typeEl.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          } catch (e) {
+            return { ok: false, code: 'INTERNAL', message: String(e && e.message ? e.message : e) };
+          }
+          var finalValue = typeEl.isContentEditable ? foldText(typeEl.textContent, 400) : String(typeEl.value ?? '');
+          return { ok: true, value: finalValue };
+        }
+        case 'readValue': {
+          var readEl = resolve(args.ref);
+          if (!readEl) return { ok: false, code: 'NO_REF' };
+          return { ok: true, value: readEl.isContentEditable ? foldText(readEl.textContent, 400) : String(readEl.value ?? '') };
+        }
+        case 'submit': {
+          var form = document.activeElement && document.activeElement.form
+            ? document.activeElement.form
+            : (args.ref ? (resolve(args.ref) || {}).form : null);
+          if (form) {
+            try {
+              if (typeof form.requestSubmit === 'function') form.requestSubmit();
+              else form.submit();
+              return { ok: true, via: 'form' };
+            } catch (e) {
+              return { ok: false, code: 'INTERNAL', message: String(e) };
+            }
+          }
+          return { ok: false, code: 'NO_REF', message: '没有可提交的表单' };
+        }
+        case 'keyFallback': {
+          var target = document.activeElement || document.body;
+          var key = String(args.key || 'Enter');
+          var code = args.code || key;
+          var keyCode = args.keyCode || 0;
+          if (!target) return { ok: false, code: 'INTERNAL', message: '没有焦点元素' };
+          var init = { key: key, code: code, keyCode: keyCode, which: keyCode, bubbles: true, cancelable: true };
+          target.dispatchEvent(new KeyboardEvent('keydown', init));
+          target.dispatchEvent(new KeyboardEvent('keyup', init));
+          return { ok: true, via: 'KeyboardEvent' };
+        }
+        case 'scrollDom': {
+          var dx = Number(args.dx || 0);
+          var dy = Number(args.dy || 0);
+          window.scrollBy(dx, dy);
+          return {
+            ok: true,
+            scroll: { y: Math.round(window.scrollY), height: document.documentElement.scrollHeight, viewport: window.innerHeight },
+          };
+        }
+        case 'measure': {
+          return {
+            ok: true,
+            height: Math.round(document.documentElement ? document.documentElement.scrollHeight : 0),
+            viewport: window.innerHeight,
+          };
+        }
+        case 'console': {
+          var limit = typeof args && typeof args.limit === 'number' ? args.limit : 50;
+          return { ok: true, entries: S.consoleErrors.slice(-limit) };
+        }
+        case 'net': {
+          var netLimit = typeof args && typeof args.limit === 'number' ? args.limit : 60;
+          var entries = S.net.slice(-netLimit);
+          try {
+            var navEntry = performance.getEntriesByType ? performance.getEntriesByType('navigation')[0] : null;
+            if (navEntry && navEntry.name) {
+              entries.unshift({ url: String(navEntry.name).slice(0, 300), method: 'GET', ok: true, durationMs: Math.round(navEntry.duration) });
+            }
+          } catch (e) { /* 忽略 */ }
+          if (entries.length === 0 && performance && performance.getEntriesByType) {
+            entries = performance.getEntriesByType('resource').slice(-netLimit).map(function (item) {
+              return { url: String(item.name).slice(0, 300), ok: true, durationMs: Math.round(item.duration) };
+            });
+          }
+          return { ok: true, entries: entries };
+        }
+        case 'selectOption': {
+          var foundSelect = resolveLoose(args.ref);
+          if (!foundSelect) return { ok: false, code: 'NO_REF', message: '选择框 ' + args.ref + ' 已失效，请先重新快照' };
+          var selectionKeys = [];
+          if (Object.prototype.hasOwnProperty.call(args, 'value')) selectionKeys.push('value');
+          if (Object.prototype.hasOwnProperty.call(args, 'label')) selectionKeys.push('label');
+          if (Object.prototype.hasOwnProperty.call(args, 'index')) selectionKeys.push('index');
+          if (selectionKeys.length !== 1) {
+            return { ok: false, code: 'BAD_ARG', message: 'select 必须在 value / label / index 中恰好提供一个' };
+          }
+          var selectionKind = selectionKeys[0];
+          if (selectionKind === 'index' && (!Number.isInteger(args.index) || args.index < 0)) {
+            return { ok: false, code: 'BAD_ARG', message: 'select 的 index 必须是零基非负整数' };
+          }
+          if (foundSelect.el.tagName !== 'SELECT') return selectCustomOption(foundSelect, args, selectionKind);
+          var selectEl = foundSelect.el;
+          var nativeCandidates = [];
+          for (var si = 0; si < selectEl.options.length; si += 1) {
+            nativeCandidates.push(optionCandidate(selectEl.options[si], true, si));
+          }
+          var nativePicked = null;
+          if (selectionKind === 'index') {
+            if (args.index < nativeCandidates.length) nativePicked = nativeCandidates[args.index];
+          } else if (selectionKind === 'value') {
+            var nativeValue = String(args.value);
+            for (var sj = 0; sj < nativeCandidates.length; sj += 1) {
+              if (nativeCandidates[sj].value === nativeValue) { nativePicked = nativeCandidates[sj]; break; }
+            }
+          } else {
+            var nativeLabel = foldText(args.label, 200);
+            for (var sk = 0; sk < nativeCandidates.length; sk += 1) {
+              if (nativeCandidates[sk].label === nativeLabel) { nativePicked = nativeCandidates[sk]; break; }
+            }
+          }
+          if (!nativePicked) return optionNotFound(nativeCandidates);
+          function selectSignature() {
+            var selected = [];
+            for (var i = 0; i < selectEl.options.length; i += 1) {
+              if (selectEl.options[i].selected) selected.push(String(i));
+            }
+            return selected.join(',');
+          }
+          var beforeSelection = selectSignature();
+          try {
+            selectEl.selectedIndex = nativePicked.index;
+            var selectView = selectEl.ownerDocument.defaultView || window;
+            selectEl.dispatchEvent(new selectView.Event('input', { bubbles: true }));
+            selectEl.dispatchEvent(new selectView.Event('change', { bubbles: true }));
+          } catch (e) {
+            return { ok: false, code: 'INTERNAL', message: '设置原生 select 失败: ' + String(e && e.message ? e.message : e) };
+          }
+          return {
+            ok: true,
+            ref: foundSelect.ref,
+            selected: { value: nativePicked.value, label: nativePicked.label, index: nativePicked.index },
+            changed: selectSignature() !== beforeSelection,
+          };
+        }
+        case 'uploadFiles': {
+          var foundUpload = resolveLoose(args.ref);
+          if (!foundUpload) return { ok: false, code: 'NO_REF', message: '文件输入框 ' + args.ref + ' 已失效，请先重新快照' };
+          var fileInput = foundUpload.el;
+          if (fileInput.tagName !== 'INPUT' || String(fileInput.type || '').toLowerCase() !== 'file') {
+            return { ok: false, code: 'NOT_FILE_INPUT', message: '目标元素不是 input[type=file]' };
+          }
+          if (!Array.isArray(args.files)) return { ok: false, code: 'UPLOAD_FAILED', message: '上传失败：files 必须是文件数组' };
+          if (!fileInput.multiple && args.files.length > 1) {
+            return { ok: false, code: 'UPLOAD_FAILED', message: '上传失败：该文件输入框不允许多选，只能上传 1 个文件' };
+          }
+          function uploadSignature() {
+            var signature = [];
+            for (var i = 0; fileInput.files && i < fileInput.files.length; i += 1) {
+              var file = fileInput.files[i];
+              signature.push(file.name + ':' + file.size + ':' + file.lastModified);
+            }
+            return signature.join('|');
+          }
+          var beforeUpload = uploadSignature();
+          try {
+            var uploadView = fileInput.ownerDocument.defaultView || window;
+            var transfer = new uploadView.DataTransfer();
+            for (var ui = 0; ui < args.files.length; ui += 1) {
+              var item = args.files[ui];
+              if (!item || typeof item.base64 !== 'string') throw new Error('第 ' + (ui + 1) + ' 个文件缺少 base64 内容');
+              var rawName = String(item.name == null ? 'upload.bin' : item.name);
+              var nameParts = rawName.split(/[\\/]/);
+              var fileName = nameParts[nameParts.length - 1] || 'upload.bin';
+              var binary = uploadView.atob(item.base64);
+              var bytes = new uploadView.Uint8Array(binary.length);
+              for (var uj = 0; uj < binary.length; uj += 1) bytes[uj] = binary.charCodeAt(uj);
+              var file = new uploadView.File([bytes], fileName, {
+                type: typeof item.type === 'string' ? item.type : '',
+                lastModified: Date.now(),
+              });
+              transfer.items.add(file);
+            }
+            fileInput.files = transfer.files;
+            fileInput.dispatchEvent(new uploadView.Event('input', { bubbles: true }));
+            fileInput.dispatchEvent(new uploadView.Event('change', { bubbles: true }));
+          } catch (e) {
+            return { ok: false, code: 'UPLOAD_FAILED', message: '上传失败：' + String(e && e.message ? e.message : e) };
+          }
+          var uploaded = [];
+          for (var uk = 0; fileInput.files && uk < fileInput.files.length; uk += 1) {
+            uploaded.push({ name: String(fileInput.files[uk].name), size: Number(fileInput.files[uk].size) || 0 });
+          }
+          return { ok: true, ref: foundUpload.ref, files: uploaded, changed: uploadSignature() !== beforeUpload };
+        }
+        case 'dialogArm': {
+          installDialogHandlers();
+          var dialogAction = String(args.action || '');
+          if (dialogAction !== 'accept' && dialogAction !== 'dismiss') {
+            return { ok: false, code: 'BAD_ARG', message: 'dialog action 必须是 accept 或 dismiss' };
+          }
+          if (args.promptText !== undefined && typeof args.promptText !== 'string') {
+            return { ok: false, code: 'BAD_ARG', message: 'dialog promptText 必须是字符串' };
+          }
+          var armedDialog = { action: dialogAction };
+          if (typeof args.promptText === 'string') armedDialog.promptText = args.promptText;
+          S.dialogResponse = armedDialog;
+          return { ok: true, armed: armedDialog };
+        }
+        case 'dialogState': {
+          return { ok: true, lastDialog: S.lastDialog || null };
+        }
+        case 'eval': {
+          try {
+            var result = (0, eval)(args.code);
+            var shaped;
+            try { shaped = JSON.parse(JSON.stringify(result)); } catch (e) { shaped = String(result); }
+            return { ok: true, value: shaped };
+          } catch (e) {
+            return { ok: false, code: 'INTERNAL', message: String(e && e.message ? e.message : e) };
+          }
+        }
+        default:
+          return { ok: false, code: 'INTERNAL', message: 'unknown page op: ' + op };
+      }
+    }
+// [PAGE_AGENT_END]

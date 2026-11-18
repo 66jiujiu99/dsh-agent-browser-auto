@@ -40,3 +40,11 @@
           browser: edge         # edge / chrome；探测顺序 executablePath → msedge → chrome
           executablePath: ""    # 空 = 注册表 App Paths / 常见安装路径自动探测
           spawnTimeoutMs: 15000 # 拉起后端口轮询总期限（1000–120000ms）
+        # 扩展桥接后端（0.8.0，默认关）：用户日常浏览器装 extension/ 目录的 MV3 扩展，
+        # 经 ws://127.0.0.1:<port> 常驻连接（token 配对认证）操作真实标签页——
+        # 不开 CDP 调试端口、无授权弹窗。enabled=true 才启动 WS 服务并注入 systemPrompt 约定；
+        # browser_ext_pair/browser_ext_status 会换进工具暴露窗口（browser_find/deep_snapshot 顺延）。
+        extensionBridge:
+          enabled: true
+          port: 18080         # 9335-9434 被 winNAT/WSL 动态保留（EACCES），实测 18080 干净            # WS 只绑 127.0.0.1；改端口后扩展弹窗里也要填同一个
+          pairTimeoutMs: 300000 # 一次性配对码有效期（5000–3600000ms）

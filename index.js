@@ -29,7 +29,15 @@ import { registerBrowserTools, BROWSER_TOOL_NAMES } from './lib/tools.js'
 import { discover, resolveEndpoint } from './lib/cdp.js'
 import { createRealDriver } from './lib/real-driver.js'
 import { createBackendRouter } from './lib/backend.js'
-import { loadDedicatedPrompt, DEDICATED_SECTION_NAME, DEDICATED_SECTION_ORDER } from './lib/prompt.js'
+import { createExtensionBridge } from './lib/extension-bridge.js'
+import {
+  loadDedicatedPrompt,
+  loadExtensionPrompt,
+  DEDICATED_SECTION_NAME,
+  DEDICATED_SECTION_ORDER,
+  EXTENSION_SECTION_NAME,
+  EXTENSION_SECTION_ORDER,
+} from './lib/prompt.js'
 
 /** 插件名（与 package.json / cordis.patch.yml 的行 id 对齐）。 */
 export const name = 'dsh-agent-browser-auto'
@@ -106,7 +114,11 @@ export function apply(ctx, rawConfig) {
   const audit = createAudit({ config, log })
   const bridge = createBridge({ config, audit })
   const realDriver = createRealDriver({ config, log })
-  const backend = createBackendRouter({ bridge, realDriver })
+  // 扩展桥接（0.8.0）：默认关闭；启用时启动 loopback WS 服务并接入后端路由。
+  const extensionBridge = config.extensionBridge.enabled === true
+    ? createExtensionBridge({ config, audit, log })
+    : undefined
+  const backend = createBackendRouter({ bridge, realDriver, extensionDriver: extensionBridge })
   const navigator = createNavigator({
     config,
     getOrigin: () => {
@@ -118,10 +130,28 @@ export function apply(ctx, rawConfig) {
     },
   })
 
-  // 总线自带掉线扫描定时器，卸载时必须清掉；真实浏览器上下文也要逐项释放。
+  // 总线自带掉线扫描定时器，卸载时必须清掉；真实浏览器上下文与扩展桥接 WS 也要逐项释放。
   ctx.effect(() => () => bridge.dispose(), 'agent-browser-auto: 命令总线')
   ctx.effect(() => () => realDriver.dispose(), 'agent-browser-auto: Playwright 后端')
   ctx.effect(() => () => backend.dispose(), 'agent-browser-auto: 后端路由')
+  if (extensionBridge !== undefined) {
+    ctx.effect(() => extensionBridge.dispose(), 'agent-browser-auto: 扩展桥接 WS 服务')
+    audit.debug('extension-bridge-mount', {
+      enabled: config.extensionBridge.enabled,
+      port: config.extensionBridge.port,
+      pairTimeoutMs: config.extensionBridge.pairTimeoutMs,
+    })
+    // 监听是异步的：端口被占时会退避重试并如实写日志/状态，绝不拖垮插件加载。
+    // start() 内部已有退避与 portError；这里只兜底捕获意外异常并落审计——静默吞掉会导致
+    // 「enabled=true 却永远不监听」且无任何排查线索（2026-11-18 实测发生过一次）。
+    extensionBridge.start().catch((error) => {
+      const message = error instanceof Error ? error.message : String(error)
+      audit.debug('extension-start-failed', { message })
+      log('error', `agent-browser-auto: 扩展桥接 start 失败：${message}`)
+    })
+  } else {
+    audit.debug('extension-bridge-mount', { enabled: false, note: 'config.extensionBridge.enabled !== true，未创建' })
+  }
 
   // webServer 是可选依赖：没有它就只是不注册路由，工具会回 NO_CHANNEL 可读错误。
   ctx.inject(['webServer'], (webCtx) => {
@@ -161,7 +191,7 @@ export function apply(ctx, rawConfig) {
   // poll 404 循环，现场什么也看不到）。把栈写进 debug.jsonl 再继续。
   ctx.effect(() => {
     try {
-      return registerBrowserTools(ctx, { config, bridge: backend, backend, navigator, audit })
+      return registerBrowserTools(ctx, { config, bridge: backend, backend, navigator, audit, extensionBridge })
     } catch (error) {
       const message = String(error?.message ?? error)
       audit.debug('tools-failed', {
@@ -173,21 +203,17 @@ export function apply(ctx, rawConfig) {
     }
   }, 'agent-browser-auto: browser_* 工具')
 
-  // 专用浏览器使用约定注入（0.7.0）。systemPrompt 按可选服务处理：profile 里没有
-  // 这个服务时插件照常加载，只是不注入。文案来自 locale/*.json（enabled=false 或
-  // 拿不到文案时什么都不注，避免给 agent 一条走不通的指引）。
+  // systemPrompt 注入（0.7.0 专用浏览器 / 0.8.0 扩展桥接）。systemPrompt 按可选服务
+  // 处理：profile 里没有这个服务时插件照常加载，只是不注入。文案来自 locale/*.json
+  // （对应能力 enabled=false 或拿不到文案时什么都不注，避免给 agent 一条走不通的指引）。
   // 子作用域取服务参照 resolveConnection 的教训：属性访问失败就换 .get()，不猜版本差异。
   ctx.inject(['systemPrompt'], (promptCtx) => {
     void (async () => {
-      let promptText = ''
-      try {
-        promptText = await loadDedicatedPrompt(config)
-      } catch (error) {
-        log('warn', `agent-browser-auto: 读取专用浏览器约定文案失败：${String(error?.message ?? error)}`)
-        return
-      }
-      if (promptText === '') return
-      /** @type {any} */
+      /** @type {Array<{ loader: () => Promise<string>, name: string, order: number, label: string }>} */
+      const sections = [
+        { loader: () => loadDedicatedPrompt(config), name: DEDICATED_SECTION_NAME, order: DEDICATED_SECTION_ORDER, label: '专用浏览器约定' },
+        { loader: () => loadExtensionPrompt(config), name: EXTENSION_SECTION_NAME, order: EXTENSION_SECTION_ORDER, label: '扩展桥接约定' },
+      ]
       let systemPrompt
       try {
         systemPrompt = promptCtx.systemPrompt
@@ -202,16 +228,26 @@ export function apply(ctx, rawConfig) {
         }
       }
       if (systemPrompt === undefined || systemPrompt === null || typeof systemPrompt.section !== 'function') {
-        log('warn', 'agent-browser-auto: systemPrompt 服务不可用，跳过专用浏览器约定注入')
+        log('warn', 'agent-browser-auto: systemPrompt 服务不可用，跳过约定注入')
         return
       }
-      promptCtx.effect(() => systemPrompt.section({
-        name: DEDICATED_SECTION_NAME,
-        order: DEDICATED_SECTION_ORDER,
-        interpolate: false,
-        text: promptText,
-      }), 'agent-browser-auto: 专用浏览器约定 section')
-      log('info', 'agent-browser-auto: 专用浏览器约定已注入 systemPrompt')
+      for (const section of sections) {
+        let promptText = ''
+        try {
+          promptText = await section.loader()
+        } catch (error) {
+          log('warn', `agent-browser-auto: 读取${section.label}文案失败：${String(error?.message ?? error)}`)
+          continue
+        }
+        if (promptText === '') continue
+        promptCtx.effect(() => systemPrompt.section({
+          name: section.name,
+          order: section.order,
+          interpolate: false,
+          text: promptText,
+        }), `agent-browser-auto: ${section.label} section`)
+        log('info', `agent-browser-auto: ${section.label}已注入 systemPrompt`)
+      }
     })()
   })
 
@@ -259,6 +295,7 @@ export function apply(ctx, rawConfig) {
     'info',
     `agent-browser-auto: ${BROWSER_TOOL_NAMES.length} 个工具就绪；审计目录 ${config.auditDir}`
     + `；enableEval=${config.enableEval}；deepMode=${config.deepMode.enabled}`
-    + `；dedicatedBrowser=${config.dedicatedBrowser.enabled}（端口 ${config.dedicatedBrowser.port}）`,
+    + `；dedicatedBrowser=${config.dedicatedBrowser.enabled}（端口 ${config.dedicatedBrowser.port}）`
+    + `；extensionBridge=${config.extensionBridge.enabled}（端口 ${config.extensionBridge.port}）`,
   )
 }

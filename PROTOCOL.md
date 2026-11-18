@@ -1,16 +1,21 @@
-# agent-browser-auto 插件内部协议（Host ⇄ Client）
+# agent-browser-auto 插件内部协议（Host ⇄ Client / Host ⇄ 扩展）
 
-本文件是 Host 半边（`index.js`）与 Client 半边（`client.js`）之间的**唯一契约**。
+本文件是 Host 半边（`index.js`）与 Client 半边（`client.js`）、扩展半边（`extension/`）之间的**唯一契约**。
 两边都按本文件实现，不允许各自发明字段。0.6.0 起 Host 在工具前增加按 session 的后端路由：
 默认仍走本文 Host ⇄ Client 协议；显式 `browser_backend launch/connect` 成功后，普通 `browser_*` op 改由
-`lib/real-driver.js` 的 Playwright 后端执行，op/args/value 的工具契约保持一致。真实后端失败绝不自动回退到 Client。
+`lib/real-driver.js` 的 Playwright 后端执行，op/args/value 的工具契约保持一致；0.8.0 起显式
+`browser_backend {action:"extension"}` 后同一套 op 改由 `lib/extension-bridge.js` 经扩展下发（§8）。
+真实后端失败绝不自动回退到 Client；扩展离线也绝不自动回退——切换永远是显式的。
 
 ## 0.1 后端控制与专用实例（Host 直执行，不进 Client 队列）
 
 `browser_backend` 支持：
-- `status`：返回 `{backend,previousBackend,real,message}`；`backend` 为 `embedded|real`。
+- `status`：返回 `{backend,previousBackend,real?,extension?,message}`；`backend` 为 `embedded|real|extension`。
+  `extensionBridge.enabled` 时必带 `extension`（`lib/extension-bridge.js` 的 `status()`，lossless）；未启用时不带该键。
 - `launch`：可见系统 Chrome/Edge + 当前 session 专用持久 profile；`temporary:true` 使用临时 profile。
 - `connect`：显式 loopback CDP `endpoint`；已有页只有提供精确 `pageUrl` 才共享，否则仅控制 Agent 新建页。
+- `extension`（0.8.0）：切入扩展桥接后端（§8）。扩展离线回 `EXTENSION_OFFLINE`（附 `browser_ext_pair` 提示）；
+  `extensionBridge.enabled=false` 回 `EXTENSION_DISABLED`。
 - `embedded`：只切换路由，保留真实浏览器连接和页面。
 - `disconnect`：释放真实后端并切回 embedded；`closeBrowser:true` 同时关闭本 session 启动的浏览器。
 
@@ -21,11 +26,13 @@
 **不做 CDP 连接**（连接仍由 `browser_backend connect` 完成）；`port`/`userDataDir` 只认配置，
 工具不接受参数覆盖；失败回 `DEDICATED_DISABLED` / `EXECUTABLE_NOT_FOUND` / `SPAWN_FAILED` / `PORT_TIMEOUT`。
 
-`browser_tab_front`（0.7.0，Host 直执行，仅真实后端）：`list` 列出已连接实例全部标签
+`browser_tab_front`（0.7.0，Host 直执行，真实/扩展后端）：`list` 列出已连接实例全部标签
 `{tabs:[{index,pageId,url,title,active}],activeId,count}`；`activate`（`index`/`urlMatch` 二选一）
 `bringToFront` 并**重绑会话活动页**，回 `{activated:true,pageId,url,title,index}`。
-轻量内嵌回 `NOT_SUPPORTED`；真实后端未连接回 `REAL_BACKEND_REQUIRED`。
+扩展模式下语义一致（chrome.tabs 实现，`pageId` 是 tabId 的字符串形式，activate 同时聚焦窗口并重绑 agent 标签）。
+轻量内嵌回 `NOT_SUPPORTED`；真实后端未连接回 `REAL_BACKEND_REQUIRED`；扩展离线回 `EXTENSION_OFFLINE`。
 
+`browser_ext_pair` / `browser_ext_status`（0.8.0，Host 直执行）：见 §8.5。
 后端状态按 session 隔离；Cookie/localStorage 不在两端复制或同步。真实模式不伪装 UA、不隐藏自动化、不承诺规避网站风控。
 
 ## 0.2 运行环境事实（已取证，不要重新假设）
@@ -167,7 +174,7 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 | 工具 | 参数 | 说明 |
 |---|---|---|
 | `browser_agent_ensure` | —（无参数） | Host 直执行；保障专用实例在跑（探活/拉起/轮询端口），不做 CDP 连接 |
-| `browser_backend` | `action:"status|launch|connect|embedded|disconnect"`, `browser?`, `temporary?`, `endpoint?`, `pageUrl?`, `closeBrowser?` | Host 直执行；按 session 查询/切换后端，不进入 Client 队列 |
+| `browser_backend` | `action:"status|launch|connect|extension|embedded|disconnect"`, `browser?`, `temporary?`, `endpoint?`, `pageUrl?`, `closeBrowser?` | Host 直执行；按 session 查询/切换后端，不进入 Client 队列 |
 | `browser_open` | `url`, `newTab?`, `waitMs?`, `scope?` | 打开并回快照 |
 | `browser_snapshot` | `maxElements?`, `text?`, `textLimit?`, `scope?` | 回快照（`text` 默认 false，最省 token） |
 | `browser_wait` | `text`/`selector`/`url` 其一, `state?`, `timeoutMs?`, `snapshot?` | 条件等待并回现场视口 |
@@ -183,11 +190,18 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 | `browser_deep_snapshot` | `url?`, `maxNodes?`, `scope?`, `includeFrames?` | Host 直连 CDP，默认关闭 |
 | `browser_screenshot` | `fullPage?` | 回 PNG 落盘路径 |
 | `browser_tabs` | `action`(list/new/switch/close), `id?` | 多页管理 |
-| `browser_tab_front` | `action`(list/activate), `index?`/`urlMatch?` | Host 直执行；真实实例全部标签的列出与前台切换（activate 同时重绑会话活动页） |
+| `browser_tab_front` | `action`(list/activate), `index?`/`urlMatch?` | Host 直执行；真实/扩展后端全部标签的列出与前台切换（activate 同时重绑会话活动页） |
 | `browser_console` | `limit?` | 控制台近况 |
 | `browser_network` | `limit?` | 请求近况 |
 | `browser_eval` | `code` | 默认关闭 |
 | `browser_close` | — | 关闭页面 |
+| `browser_ext_pair` | —（无参数） | Host 直执行；生成一次性配对码 + 扩展安装指引（§8.5） |
+| `browser_ext_status` | —（无参数） | Host 直执行；扩展桥接在线状态（§8.5） |
+
+> 暴露顺序注意（0.6.0 实测）：宿主对每插件工具暴露存在**约 16 个**的截断，`BROWSER_TOOL_NAMES`
+> 顺序即暴露优先级。`extensionBridge.enabled=true` 时 `browser_ext_pair`/`browser_ext_status`
+> 换进第 15/16 位（`browser_find`/`browser_deep_snapshot` 顺延出窗口）；`enabled=false` 时两者在尾部。
+> 详见 `lib/tools.js` 的 `toolOrder()` 与 `docs/EXTENSION_BACKEND.md`。
 
 所有工具返回**文本**（`output.render` 里拼），统一格式：
 
@@ -229,6 +243,10 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
   `EXECUTABLE_NOT_FOUND`；进程启动失败回 `SPAWN_FAILED`；拉起后端口超时未监听回 `PORT_TIMEOUT`。
 - `browser_tab_front`（0.7.0）：轻量内嵌后端回 `NOT_SUPPORTED`；真实后端未连接回
   `REAL_BACKEND_REQUIRED`；index 越界或 urlMatch 无命中回 `NO_PAGE`；urlMatch 命中多个回 `BAD_ARG`。
+- `browser_ext_pair`（0.8.0）：`extensionBridge.enabled=false` 回 `EXTENSION_DISABLED`。
+- `browser_backend` / `browser_tab_front` 扩展路径（0.8.0）：功能未启用回 `EXTENSION_DISABLED`；
+  WS 服务未监听或无扩展在线回 `EXTENSION_OFFLINE`；命令下发后扩展无响应回 `TIMEOUT`；
+  截图落盘失败回 `SCREENSHOT_SAVE_FAILED`；扩展侧拒绝执行的页面回 `NOT_INJECTABLE`。
 
 ### 5.2 上传数据边界
 
@@ -346,3 +364,78 @@ stats: 1 elements, 220 chars, ~60 tokens (scope=viewport) +1 -0 ~1 textChanged t
 调试端口无认证、只绑 loopback；运行期间本机任意进程都能控制该 DSH 实例。因此默认
 `deepMode.enabled=false`、端口随机（`--remote-debugging-port=0`），并用
 `--remote-allow-origins=devtools://devtools` 阻断网页从浏览器内部连调试端口。插件只发只读命令。
+
+## 8. 扩展桥接后端（0.8.0）—— Host ⇄ 扩展的常驻 WebSocket
+
+用户日常浏览器（Edge/Chrome 默认 profile）装上 `extension/` 的 MV3 扩展后，扩展**主动**连到
+`ws://127.0.0.1:<extensionBridge.port>?token=<token>`，命令与结果经这条常驻连接往返。
+不开 CDP 调试端口、没有授权弹窗、连接常驻。实现：Host 侧 `lib/extension-bridge.js`，
+扩展侧 `extension/background.js`（SW 主连接 + 20s 应用层心跳 + offscreen 兜底）。
+
+### 8.1 认证（一次性配对码 → 长效 token）
+
+1. agent 调 `browser_ext_pair` → Host 生成 8 位无歧义字符配对码（单次使用，
+   `extensionBridge.pairTimeoutMs` 默认 300000ms 过期）+ 长效 token（32 字节 base64url）；
+2. 用户把扩展加载进浏览器（load unpacked），点扩展图标输入配对码；
+3. 扩展以 `?token=<配对码>` 连接 → Host 在 **HTTP upgrade 阶段**校验：无效/过期直接 401
+   （不升级成 WebSocket）；
+4. 通过后 Host 发 `{type:"ready", version:1, token:<长效token>}`，扩展把 token 存
+   `chrome.storage.local`；之后每次重连都带这个 token；
+5. Host 只持久化 token 的 **SHA-256**（`<auditDir>/extension-paired.json`：`{clientId, digest, pairedAt}`），
+   原文不落盘。服务重启后长效 token 依然有效。
+
+### 8.2 WS 消息（JSON，全双工）
+
+| 方向 | type | 说明 |
+|---|---|---|
+| Host→扩展 | `ready` | 认证通过；配对连接额外携带 `token`（长效凭证） |
+| 扩展→Host | `hello` | `{clientId, version}`；clientId 是扩展安装 id（storage.local 随机串），权威值以它为准 |
+| Host→扩展 | `helloAck` / `sessionReady` | hello 确认 / 会话登记完成（`sessionReady` 回显权威 clientId） |
+| 扩展→Host | `ping` | `{t}` 每 20s；Host 回 `pong`（协议层 ping/pong 帧也支持） |
+| Host→扩展 | `command` | `{id, op, args}`，与 §2.2 同一套 op/args |
+| 扩展→Host | `result` | `{id, ok, value}` 或 `{id, ok:false, error:{code,message}}`，错误码沿用 §2.3 + §8.6 |
+| 扩展→Host | `log` | `{level, message, data?}` → debug.jsonl（扩展侧任何 catch 必须上报） |
+| Host→扩展 | `superseded` | 同 clientId 的新连接顶掉旧连接（断网重连 / offscreen 接管）时发给旧连接 |
+
+会话模型：同一 clientId 的重连会顶掉旧连接；多个浏览器同时在线时命令发给最近心跳的那个。
+扩展超过 ~45s 无任何消息判定掉线。
+
+### 8.3 SW 生命周期与 offscreen 兜底
+
+- 主路径：SW 直接持有 WS，每 20s 发应用层 `ping`——Chrome/Edge 116+ 起 WS 活动重置 SW 的
+  30s 休眠计时器，连接因此常驻（`minimum_chrome_version: 116`）。
+- 兜底：offscreen 文档（`KEEP_ALIVE` 原因）每 15s 探活 SW（runtime 消息本身也会唤醒/保活 SW）；
+  探活连续失败时 offscreen 用同一 token/clientId 接管 WS，消息经 `chrome.runtime` 转交并唤醒 SW；
+  SW 探活连续 3 次成功后交还所有权。所有权记在 `chrome.storage.session` 的 `bridgeOwner`。
+- SW 被事件唤醒（休眠后恢复）时会先从 storage 读取状态再重连，Host 侧按 §8.2 顶掉旧连接自愈。
+
+### 8.4 扩展侧 op 语义（与 §2.2 的差异，都是刻意的）
+
+- `open`：只操作「agent 自己的标签页」——`newTab:false` 复用上次 agent 标签（没有则新建），
+  绝不导航用户手头的其它标签；`newTab:true` 新建。
+- 点击/输入/按键没有真实输入管线（无 CDP），走共享 pageAgent 的 DOM 合成路径
+  （`clickDom`/`typeFallback`/`keyFallback`/`scrollDom`）；`changed` 用 DOM mutations/URL 判定。
+- `screenshot`：`captureVisibleTab`（要求 agent 标签在前台，否则 `SCREENSHOT_NEEDS_FRONT`）；
+  PNG 以 `pngBase64` 放进 result，Host 落盘 `<auditDir>/shots/` 并摘除该字段（§1 的 /shot 端点不适用）。
+  `fullPage` 不支持（结果带 note 说明）。
+- `tabFront`：chrome.tabs 实现，`pageId` 是 tabId 字符串；`activate` 同时 `windows.update({focused:true})`。
+- `tabs`/`console`/`network`/`eval`：`NOT_SUPPORTED`（内嵌面板专属；`browser_eval` 在扩展模式一律拒绝）。
+- 页面注入：`chrome.scripting.executeScript({world:'MAIN', func: pageAgent})`；chrome://、Web Store 等
+  受保护页面回 `NOT_INJECTABLE`。**快照契约与内嵌完全一致**：pageAgent 从 client.js 抽取到
+  `extension/page-agent.js`，两份标记块逐字节一致（`test/page-agent-contract.test.mjs` 强制）。
+
+### 8.5 Host 侧工具
+
+- `browser_ext_pair`（无参数）：`{ok:true, code, expiresAt, port, wsUrl, instructions}`；instructions 是
+  locale 驱动的安装指引（`{extensionDir}`/`{code}`/`{port}` 占位符）。`enabled=false` 回 `EXTENSION_DISABLED`。
+- `browser_ext_status`（无参数）：`{ok:true, enabled, listening, port, paired, connected, clientId, lastHeartbeatMs, pairPending, message}`；
+  未启用时 `enabled:false` + 提示语（不是错误——查询本身合法）。全部字段 lossless。
+
+### 8.6 安全
+
+- WS 只绑 `127.0.0.1`；`port` 只来自配置，工具参数不能覆盖；普通 HTTP 请求回 426。
+- token 校验失败在 HTTP 层 401；配对码单次使用、短时效、8 位无歧义字符（≈31⁸ 空间）。
+- Host 只存 token 哈希；审计/日志绝不记录 token 原文（只记哈希前 8 位指纹）。
+- 扩展 token 存本机 `chrome.storage.local`，不出本机；扩展能力边界 = 用户给它加载的页面的
+  executeScript 权限（manifest 声明 `<all_urls>` + tabs/scripting，README 明示用途）。
+- 与 deepMode 不同：这条通道**有认证**且默认关闭（`extensionBridge.enabled=false`）。

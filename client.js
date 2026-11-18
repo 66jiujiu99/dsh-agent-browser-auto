@@ -111,6 +111,7 @@ window.__ModuleLoader__.load({
     // 注意：下面这个函数会被 toString() 后注入 guest 页面执行，**必须自包含**
     // （不引用本文件里的任何变量），且只能返回可结构化克隆的值。
 
+    // [PAGE_AGENT_BEGIN] —— 本块与 extension/page-agent.js 的标记块逐字节一致（test/page-agent-contract.test.mjs 强制）。
     function pageAgent(op, args) {
       var S = window.__dshAgent;
       if (!S) {
@@ -1105,6 +1106,7 @@ window.__ModuleLoader__.load({
           return { ok: false, code: 'INTERNAL', message: 'unknown page op: ' + op };
       }
     }
+    // [PAGE_AGENT_END]
 
     // ────────────────────────────── 页面对象 ──────────────────────────────
 

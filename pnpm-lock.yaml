@@ -11,6 +11,9 @@ importers:
       playwright-core:
         specifier: 1.64.1
         version: 1.64.1
+      ws:
+        specifier: ^8.23.0
+        version: 8.23.0
 
 packages:
 
@@ -19,6 +22,20 @@ packages:
     engines: {node: '>=20'}
     hasBin: true
 
+  ws@8.23.0:
+    resolution: {integrity: sha512-wCkmX8QMOrKjgO8HW2WyDbTSGeqkocxgDzS9iR79rEAexty6/2qzilx3Ag8Tqf9ykop3irLKle0MtVn5qjVnoQ==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+
 snapshots:
 
   playwright-core@1.64.1: {}
+
+  ws@8.23.0: {}

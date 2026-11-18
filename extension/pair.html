@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>DSH Agent 浏览器桥</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      width: 300px;
+      margin: 0;
+      padding: 14px;
+      font: 13px/1.6 system-ui, "Microsoft YaHei", sans-serif;
+    }
+    h1 { font-size: 14px; margin: 0 0 8px; }
+    .status { padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, currentColor 8%, transparent); margin-bottom: 10px; }
+    .status.ok { color: #1a7f37; }
+    .status.bad { color: #b42318; }
+    label { display: block; margin: 8px 0 2px; }
+    input {
+      width: 100%; box-sizing: border-box; padding: 6px 8px;
+      border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+      border-radius: 6px; background: transparent; color: inherit; font: inherit;
+    }
+    .row { display: flex; gap: 8px; margin-top: 12px; }
+    button {
+      flex: 1; padding: 7px 0; border: 0; border-radius: 6px;
+      background: #2563eb; color: #fff; font: inherit; cursor: pointer;
+    }
+    button.ghost { background: transparent; color: inherit; border: 1px solid color-mix(in srgb, currentColor 30%, transparent); }
+    .hint { color: color-mix(in srgb, currentColor 70%, transparent); font-size: 12px; margin-top: 10px; }
+    code { font-family: ui-monospace, Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <h1>DSH Agent 浏览器桥</h1>
+  <div id="status" class="status">读取状态中…</div>
+  <label for="port">Host 端口（默认 9335）</label>
+  <input id="port" type="number" min="1" max="65535" value="9335">
+  <label for="code">配对码（在 DSH 里运行 browser_ext_pair 生成）</label>
+  <input id="code" type="text" maxlength="8" autocapitalize="characters" autocomplete="off" placeholder="例如 K7M2QP9A">
+  <div class="row">
+    <button id="pair">配对</button>
+    <button id="unpair" class="ghost">清除配对</button>
+  </div>
+  <p class="hint">
+    配对成功后本扩展会与 DSH Host 保持常驻连接；agent 之后通过 browser_backend
+    <code>{action:"extension"}</code> 操作本浏览器的真实标签页。token 只存在本机。
+  </p>
+  <script type="module" src="pair.js"></script>
+</body>
+</html>

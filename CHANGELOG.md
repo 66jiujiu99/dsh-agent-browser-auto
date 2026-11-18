@@ -2,6 +2,44 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 0.8.0 — 2026-11-18
+
+### 新增
+
+- **扩展桥接后端（Extension Bridge）**：用户日常浏览器（Edge/Chrome 默认 profile）安装 `extension/`
+  目录的 MV3 扩展后，扩展与插件 Host 建立 `ws://127.0.0.1:9335`（可配）常驻 WebSocket——
+  **不开 CDP 调试端口、无 --remote-debugging、无授权弹窗**，agent 的 `browser_*` 工具经此通道
+  操作用户日常浏览器的真实标签页。工具总数由 22 增至 24。
+- **Host 侧 `lib/extension-bridge.js`**：loopback-only WS 服务（端口占用退避重试）、一次性配对码 →
+  长效 token 认证（HTTP upgrade 阶段 401 拒绝；Host 只持久化 token 的 SHA-256 到
+  `<auditDir>/extension-paired.json`）、同 clientId 重连顶掉旧连接、命令路由复用 backend.js 结构、
+  截图 PNG 落盘。新增依赖 `ws@8.23.0`（锁定版本）。
+- **MV3 扩展（`extension/`）**：`background.js`（WS 状态机 + 20s 应用层心跳保活，Chrome/Edge 116+
+  起 WS 活动重置 SW 30s 休眠计时器 + offscreen `KEEP_ALIVE` 兜底接管/交还）、`offscreen.html/js`、
+  `pair.html/js` 配对弹窗、`manifest.json`（tabs/scripting/storage/offscreen/alarms + `<all_urls>`）。
+- **新工具**：`browser_ext_pair`（生成配对码 + 安装指引，`enabled=false` 回 `EXTENSION_DISABLED`）、
+  `browser_ext_status`（`{enabled,listening,paired,connected,clientId,lastHeartbeatMs,…}`）；
+  `browser_backend` 新增 `action:"extension"`（离线回 `EXTENSION_OFFLINE` 并附配对提示，绝不自动回退）；
+  `browser_tab_front` 支持扩展模式（chrome.tabs 实现，语义一致）。
+- **快照契约单一来源**：pageAgent 从 client.js 抽取到 `extension/page-agent.js`，两侧以标记块
+  逐字节一致（`test/page-agent-contract.test.mjs` 强制）；扩展经 `chrome.scripting.executeScript`
+  （world MAIN）注入同一函数，`@ref`/角色/名字/坐标输出契约与内嵌完全一致。
+- **systemPrompt 注入**：`extensionBridge.enabled:true` 时注入扩展桥接约定（可选服务，缺失不注入）。
+- 配置新增 `extensionBridge` 段：`enabled`（默认 false）/`port`（默认 9335）/`pairTimeoutMs`（默认 300000）。
+
+### 验证与已知限制
+
+- 全量自动化 **111 / 111 通过**（0.7.0 的 86 项全部保持 + 新增 25 项：WS 服务 12 项、共享契约 6 项、
+  工具层 5 项、后端路由 2 项），`node --test --test-concurrency=1`。
+- **工具暴露截断**：`extensionBridge.enabled=true` 时 `browser_ext_pair`/`browser_ext_status` 换进
+  暴露窗口第 15/16 位，`browser_find`/`browser_deep_snapshot` 顺延出窗口（仍注册，内嵌/真实后端可用）；
+  `enabled=false`（默认）时新工具在尾部，对存量用户零影响。
+- 扩展模式语义差异（刻意）：`open` 只操作 agent 自己的标签页；点击/输入走 DOM 合成路径（无 CDP
+  真实输入管线）；`screenshot` 仅视口且要求 agent 标签在前台；`tabs/console/network/eval` 回
+  `NOT_SUPPORTED`；chrome:// 等受保护页面回 `NOT_INJECTABLE`。
+- **待 lead 真机验证**：扩展装入日常 Edge → 配对 → browser_open 打开真实页面；SW 休眠 5 分钟后
+  命令自动唤醒；断网重连与 offscreen 接管/交还；内嵌/real 后端回归不受影响。
+
 ## 0.7.0 — 2026-11-18
 
 ### 新增
