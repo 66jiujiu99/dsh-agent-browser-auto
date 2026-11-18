@@ -2,12 +2,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-0.2.1--rc.2-6f42c1.svg)](#兼容性)
-[![Tests](https://img.shields.io/badge/tests-68%2F68%20pass-brightgreen.svg)](#验收状态2026-11-03-实测)
+[![Tests](https://img.shields.io/badge/tests-86%2F86%20pass-brightgreen.svg)](#验收状态2026-11-03-实测)
 
 给 DSH 桌面版装上「看得见的手」：模型用 `browser_*` 工具看见并操作用户可见的浏览器页面。
 默认是右侧边栏里的轻量 Electron `<webview>`；需要完整浏览器能力时，可显式切换到独立 Agent profile 的真实 Chrome/Edge。
 
-- 版本：0.6.0 · 目标：DSH 桌面版 0.2.1-rc.5（Electron 44.7.0）
+- 版本：0.7.0 · 目标：DSH 桌面版 0.2.1-rc.5（Electron 44.7.0）
 - 契约：`PROTOCOL.md`（Host ⇄ Client 协议与双后端路由，改字段两边一起改）
 
 **为什么有两种模式**：轻量模式启动快、就在侧边栏里，适合普通读取和表单操作；真实模式使用系统 Chrome/Edge
@@ -104,10 +104,11 @@ plugin_manager remove_bundle target=dsh-agent-browser-auto     # 再移除
 
 审计/调试数据不会自动删除，如需清理：删掉 `~/.dsh/storages/agent-browser-auto/` 即可。
 
-## 工具面（20 个）
+## 工具面（22 个）
 
 | 工具 | 作用 | 说明 |
 |---|---|---|
+| `browser_agent_ensure` | **专用实例保障** | 探测 `127.0.0.1:<dedicatedBrowser.port>`（默认 9333），未监听才按配置拉起浏览器并轮询端口；无参数，端口/profile 只认配置。不做 CDP 连接，连接仍走 `browser_backend connect` |
 | `browser_backend` | 查询/切换浏览器后端 | `status` / `launch` / `connect` / `embedded` / `disconnect`；按 Agent 会话生效，绝不自动切换 |
 | `browser_open` | 打开 URL 并回快照 | `newTab` 可在当前后端新开一页 |
 | `browser_snapshot` | 重拍快照 | `maxElements`（默认 80）/`text`（默认 false，最省 token）/`textLimit`（默认 3000）/`scope`（默认 `viewport`） |
@@ -124,6 +125,7 @@ plugin_manager remove_bundle target=dsh-agent-browser-auto     # 再移除
 | `browser_deep_snapshot` | **深度模式**：CDP 读 a11y 树 | 能看闭 shadow root / 跨源 iframe；需重启开调试端口（见下节），默认关闭 |
 | `browser_screenshot` | PNG 落盘 | 返回绝对路径，可直接 `read_image` |
 | `browser_tabs` | list/new/switch/close | 面板内多页，每个页面独立 guest |
+| `browser_tab_front` | **真实实例标签管理** | `list` 列出已连接实例的全部标签（含非本会话登记页）；`activate`（`index`/`urlMatch` 二选一）把标签切到前台**并重绑会话活动页**，后续 snapshot/click 直接作用于它；轻量内嵌回 `NOT_SUPPORTED`，真实后端未连接回 `REAL_BACKEND_REQUIRED` |
 | `browser_console` | 页面控制台近况 | `console-message` 事件 + 页面 error 钩子 |
 | `browser_network` | 请求近况 | 主文档 navigation entry + fetch/XHR 包装 + Resource Timing 兜底 |
 | `browser_eval` | 执行 JS | **默认关闭**（`enableEval`） |
@@ -194,6 +196,12 @@ stats: 1 elements, 74 chars, ~19 tokens (scope=viewport)
 | `realBrowser.browser` | `auto` | 真实模式依次选择 `chrome` / `edge`，也可固定一种；不会下载浏览器 |
 | `realBrowser.profileDir` | `~/.dsh/storages/agent-browser-auto/real-browser-profiles` | 每会话专用持久 profile 的根目录，不使用日常浏览器目录 |
 | `realBrowser.startupTimeoutMs` | `30000` | 启动或连接真实浏览器的超时（1000–120000ms） |
+| `dedicatedBrowser.enabled` | `false` | 专用实例保障开关；关闭时 `browser_agent_ensure` 回 `DEDICATED_DISABLED`，且不注入 systemPrompt 约定 |
+| `dedicatedBrowser.port` | `9333` | 专用实例的 CDP 调试端口；endpoint 恒为 `http://127.0.0.1:<port>`，工具参数不能覆盖 |
+| `dedicatedBrowser.userDataDir` | `~/.dsh/storages/agent-browser-auto/dedicated-profile` | 专用实例独立 profile 目录（必须与日常浏览器隔离）；工具参数不能覆盖 |
+| `dedicatedBrowser.browser` | `edge` | 拉起时优先的浏览器；可执行文件探测顺序恒为 `executablePath` → 注册表/常见路径 msedge → chrome |
+| `dedicatedBrowser.executablePath` | `""` | 显式指定浏览器可执行文件；空 = 自动探测 |
+| `dedicatedBrowser.spawnTimeoutMs` | `15000` | 拉起后端口轮询总期限（1000–120000ms），超时回 `PORT_TIMEOUT` |
 
 ## 深度模式（CDP，可选，默认关闭）
 
@@ -253,6 +261,43 @@ tools\start-dsh-debug.ps1      ← 真正的逻辑（.cmd 只是纯 ASCII 转发
 **参数**：`url?`（默认用本会话最近打开的 URL）、`maxNodes?`（默认配置值 200）、
 `scope?: 'a11y'|'dom'`（默认 a11y；dom 走 `DOM.getDocument({depth:-1,pierce:true})` 结构）、
 `includeFrames?: boolean`（默认 true，深入跨源 iframe 会话）。
+
+## 专用浏览器实例（0.7.0）
+
+用户可以维护一个「专用浏览器实例」：Edge/Chrome + 独立 profile + 固定 CDP 端口（默认 9333，
+启动参数 `--user-data-dir=<dedicatedBrowser.userDataDir> --remote-debugging-port=<port> --no-first-run --no-default-browser-check`）。
+痛点是窗口被关掉后端口就消失，agent 要自己查端口、跑启动脚本再 connect——现在一条工具搞定。
+
+```
+browser_agent_ensure   →  {ok:true, ensured:true, spawned:false, port, endpoint}   已在跑，直接用
+                       →  {ok:true, ensured:true, spawned:true,  port, endpoint, pid}  刚拉起
+                       →  {ok:false, error:{code, message}}  DISABLED / EXECUTABLE_NOT_FOUND / SPAWN_FAILED / PORT_TIMEOUT
+browser_backend {action:"connect", endpoint:"http://127.0.0.1:9333"}               连接（职责分离，ensure 不做 CDP）
+```
+
+**边界（都是硬约束）**：
+
+- `port` / `userDataDir` / 浏览器可执行路径**只来自插件配置**，工具不接受任何参数覆盖——
+  防止提示注入把任意参数塞进浏览器启动命令；endpoint 恒为 `http://127.0.0.1:<port>`（loopback）。
+- spawn 用参数数组 + `shell:false`，Windows 上 `detached:true` + `unref()`：浏览器进程不挂在
+  Host 进程树下，Host 退出/重启不牵连浏览器。
+- `enabled:false` 时工具回 `DEDICATED_DISABLED`，且**不注入** systemPrompt 约定（不给 agent 一条走不通的指引）。
+- 该实例 profile 含用户登录态：约定文案明确「不代输凭证」；实例与用户日常浏览器相互隔离。
+
+**systemPrompt 注入**：`dedicatedBrowser.enabled:true` 时，插件会把一段简短约定
+（先 `browser_agent_ensure` 保障实例 → 再 `browser_backend connect` → 不代输凭证 → 与日常浏览器隔离）
+注入到 agent 的 systemPrompt（section `agent-browser-auto:dedicated-browser`）。文案在
+`locale/zh.json` / `locale/en.json` 的 `systemPrompt.dedicatedBrowser`，`{endpoint}` / `{port}`
+占位符按配置替换；Host 侧默认取 zh，文件缺失时回落 en。`systemPrompt` 是可选服务：profile
+里没有它时插件照常加载，只是不注入。
+
+**真实实例的标签管理**：连接专用实例后，`browser_tab_front` 能看到实例里**全部**标签
+（含 agent 自己没开过的页），`{action:"activate", index|urlMatch}` 把目标切到前台并**重绑会话
+活动页**——这一点和 `browser_tabs switch` 不同：后者只对会话自己登记的页面生效，而真实后端
+连上实例后只登记自己新建的页，`bringToFront` 后旧绑定不会自动跟随，导致 snapshot 打到旧页；
+`browser_tab_front activate` 同时完成「切前台 + 重绑」。轻量内嵌后端回 `NOT_SUPPORTED`
+（用 `browser_tabs`），真实后端未连接回 `REAL_BACKEND_REQUIRED`。
+
 
 ## 常见问题：双击 `.cmd` 弹「无法验证发布者 / 你确定要运行此软件吗」
 
@@ -360,13 +405,29 @@ JavaScript，没有任何编译产物或下载执行步骤。这也是本仓库�
 - 切回内嵌后 `browser_open` 与结构化快照正常；后端状态保持可查询。
 - 内嵌 DevTools 仅确认按钮与 API 调用路径，**没有确认窗口打开**；真实 Chrome 的 DevTools 由浏览器原生提供。
 
+### 0.7.0 自动化结果（2026-11-18）
+
+- 全量命令 **86 / 86 通过**（旧 68 项全部保持 + 新增 18 项），Node v24.21.0 / Windows，
+  `node --test --test-concurrency=1`（命令见下「验证方法」）。
+- 新增覆盖（`test/dedicated.test.mjs` 15 项 + `test/tools.test.mjs` 3 项）：端口探测（真实 loopback
+  server）、spawn 参数数组与 `detached/unref/shell:false`、可执行文件探测顺序、`enabled=false` 分支、
+  `SPAWN_FAILED` / `PORT_TIMEOUT` / `EXECUTABLE_NOT_FOUND` 结构化错误、结果对象 lossless（JSON 往返 +
+  无 undefined 值字段）、配置默认值/覆盖/非法值拒绝、locale 文案与 `{endpoint}`/`{port}` 占位符替换。
+- `browser_tab_front` 在**真实浏览器**上验证两种模式：launch 模式（临时 profile Chrome，含 about:blank
+  初始页共存、activate 重绑后快照跟切）与 **CDP attach 模式**（连接含外部页的实例，`activate` 激活
+  外部页并重绑会话、快照打到被激活页、urlMatch 命中多个被拒绝）。
+- `pnpm pack --dry-run --json` 通过：包含 `lib/dedicated.js` / `lib/prompt.js` / `locale/*.json`，不含测试。
+- **待 lead 真机验证**：① `browser_agent_ensure` 真实拉起专用 Edge（`C:\Data\browser-agent` + 9333，
+  自动化只用了注入 spawn + 真实 TCP 探测，未启动真实 Edge）；② 安装后 systemPrompt 约定的实际注入效果
+  （代码按 dsh-dev-copilot/dsh-life 同款 `systemPrompt.section()` API 注册，未在活体 Host 上核验）。
+
 ### 验证方法（可复现）
 
 先执行 `pnpm install`，再在仓库根目录运行：
 
 ```powershell
-# 全量：单元 + CDP + 默认真实 Chrome/Edge 操作链
-node --test --test-concurrency=1 test/snapshot.test.mjs test/tools.test.mjs test/backend.test.mjs test/cdp.test.mjs test/real-driver.test.mjs test/real-driver-cdp.test.mjs
+# 全量：单元 + 专用实例保障 + CDP + 默认真实 Chrome/Edge 操作链
+node --test --test-concurrency=1 test/snapshot.test.mjs test/tools.test.mjs test/backend.test.mjs test/dedicated.test.mjs test/cdp.test.mjs test/real-driver.test.mjs test/real-driver-cdp.test.mjs
 
 # 指定 Edge 复测真实后端与 CDP 附加
 $env:REAL_BROWSER = 'edge'

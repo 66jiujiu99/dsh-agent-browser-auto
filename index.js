@@ -29,6 +29,7 @@ import { registerBrowserTools, BROWSER_TOOL_NAMES } from './lib/tools.js'
 import { discover, resolveEndpoint } from './lib/cdp.js'
 import { createRealDriver } from './lib/real-driver.js'
 import { createBackendRouter } from './lib/backend.js'
+import { loadDedicatedPrompt, DEDICATED_SECTION_NAME, DEDICATED_SECTION_ORDER } from './lib/prompt.js'
 
 /** 插件名（与 package.json / cordis.patch.yml 的行 id 对齐）。 */
 export const name = 'dsh-agent-browser-auto'
@@ -172,6 +173,48 @@ export function apply(ctx, rawConfig) {
     }
   }, 'agent-browser-auto: browser_* 工具')
 
+  // 专用浏览器使用约定注入（0.7.0）。systemPrompt 按可选服务处理：profile 里没有
+  // 这个服务时插件照常加载，只是不注入。文案来自 locale/*.json（enabled=false 或
+  // 拿不到文案时什么都不注，避免给 agent 一条走不通的指引）。
+  // 子作用域取服务参照 resolveConnection 的教训：属性访问失败就换 .get()，不猜版本差异。
+  ctx.inject(['systemPrompt'], (promptCtx) => {
+    void (async () => {
+      let promptText = ''
+      try {
+        promptText = await loadDedicatedPrompt(config)
+      } catch (error) {
+        log('warn', `agent-browser-auto: 读取专用浏览器约定文案失败：${String(error?.message ?? error)}`)
+        return
+      }
+      if (promptText === '') return
+      /** @type {any} */
+      let systemPrompt
+      try {
+        systemPrompt = promptCtx.systemPrompt
+      } catch {
+        systemPrompt = undefined
+      }
+      if ((systemPrompt === undefined || systemPrompt === null) && typeof promptCtx.get === 'function') {
+        try {
+          systemPrompt = promptCtx.get('systemPrompt')
+        } catch {
+          systemPrompt = undefined
+        }
+      }
+      if (systemPrompt === undefined || systemPrompt === null || typeof systemPrompt.section !== 'function') {
+        log('warn', 'agent-browser-auto: systemPrompt 服务不可用，跳过专用浏览器约定注入')
+        return
+      }
+      promptCtx.effect(() => systemPrompt.section({
+        name: DEDICATED_SECTION_NAME,
+        order: DEDICATED_SECTION_ORDER,
+        interpolate: false,
+        text: promptText,
+      }), 'agent-browser-auto: 专用浏览器约定 section')
+      log('info', 'agent-browser-auto: 专用浏览器约定已注入 systemPrompt')
+    })()
+  })
+
   ctx.effect(() => () => {
     audit.debug('disposed', { stats: bridge.stats() })
   }, 'agent-browser-auto: 收尾日志')
@@ -215,6 +258,7 @@ export function apply(ctx, rawConfig) {
   log(
     'info',
     `agent-browser-auto: ${BROWSER_TOOL_NAMES.length} 个工具就绪；审计目录 ${config.auditDir}`
-    + `；enableEval=${config.enableEval}；deepMode=${config.deepMode.enabled}`,
+    + `；enableEval=${config.enableEval}；deepMode=${config.deepMode.enabled}`
+    + `；dedicatedBrowser=${config.dedicatedBrowser.enabled}（端口 ${config.dedicatedBrowser.port}）`,
   )
 }

@@ -5,7 +5,7 @@
 默认仍走本文 Host ⇄ Client 协议；显式 `browser_backend launch/connect` 成功后，普通 `browser_*` op 改由
 `lib/real-driver.js` 的 Playwright 后端执行，op/args/value 的工具契约保持一致。真实后端失败绝不自动回退到 Client。
 
-## 0.1 后端控制（Host 直执行，不进 Client 队列）
+## 0.1 后端控制与专用实例（Host 直执行，不进 Client 队列）
 
 `browser_backend` 支持：
 - `status`：返回 `{backend,previousBackend,real,message}`；`backend` 为 `embedded|real`。
@@ -13,6 +13,18 @@
 - `connect`：显式 loopback CDP `endpoint`；已有页只有提供精确 `pageUrl` 才共享，否则仅控制 Agent 新建页。
 - `embedded`：只切换路由，保留真实浏览器连接和页面。
 - `disconnect`：释放真实后端并切回 embedded；`closeBrowser:true` 同时关闭本 session 启动的浏览器。
+
+`browser_agent_ensure`（0.7.0，Host 直执行）：保障「专用浏览器实例」进程活着。TCP 探测
+`127.0.0.1:<dedicatedBrowser.port>`（默认 9333）→ 已监听回 `{ok:true,ensured:true,spawned:false,port,endpoint}`；
+未监听按配置拉起（参数数组 + `shell:false`，Windows `detached:true`+`unref`）并轮询端口（200ms 间隔，
+`spawnTimeoutMs` 默认 15000）→ 成功回 `{ok:true,ensured:true,spawned:true,port,endpoint,pid}`。
+**不做 CDP 连接**（连接仍由 `browser_backend connect` 完成）；`port`/`userDataDir` 只认配置，
+工具不接受参数覆盖；失败回 `DEDICATED_DISABLED` / `EXECUTABLE_NOT_FOUND` / `SPAWN_FAILED` / `PORT_TIMEOUT`。
+
+`browser_tab_front`（0.7.0，Host 直执行，仅真实后端）：`list` 列出已连接实例全部标签
+`{tabs:[{index,pageId,url,title,active}],activeId,count}`；`activate`（`index`/`urlMatch` 二选一）
+`bringToFront` 并**重绑会话活动页**，回 `{activated:true,pageId,url,title,index}`。
+轻量内嵌回 `NOT_SUPPORTED`；真实后端未连接回 `REAL_BACKEND_REQUIRED`。
 
 后端状态按 session 隔离；Cookie/localStorage 不在两端复制或同步。真实模式不伪装 UA、不隐藏自动化、不承诺规避网站风控。
 
@@ -154,6 +166,7 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
+| `browser_agent_ensure` | —（无参数） | Host 直执行；保障专用实例在跑（探活/拉起/轮询端口），不做 CDP 连接 |
 | `browser_backend` | `action:"status|launch|connect|embedded|disconnect"`, `browser?`, `temporary?`, `endpoint?`, `pageUrl?`, `closeBrowser?` | Host 直执行；按 session 查询/切换后端，不进入 Client 队列 |
 | `browser_open` | `url`, `newTab?`, `waitMs?`, `scope?` | 打开并回快照 |
 | `browser_snapshot` | `maxElements?`, `text?`, `textLimit?`, `scope?` | 回快照（`text` 默认 false，最省 token） |
@@ -170,6 +183,7 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 | `browser_deep_snapshot` | `url?`, `maxNodes?`, `scope?`, `includeFrames?` | Host 直连 CDP，默认关闭 |
 | `browser_screenshot` | `fullPage?` | 回 PNG 落盘路径 |
 | `browser_tabs` | `action`(list/new/switch/close), `id?` | 多页管理 |
+| `browser_tab_front` | `action`(list/activate), `index?`/`urlMatch?` | Host 直执行；真实实例全部标签的列出与前台切换（activate 同时重绑会话活动页） |
 | `browser_console` | `limit?` | 控制台近况 |
 | `browser_network` | `limit?` | 请求近况 |
 | `browser_eval` | `code` | 默认关闭 |
@@ -211,6 +225,10 @@ Client 用它上报：webview 创建/销毁、dom-ready、did-fail-load、异常
 - `select`：未找到匹配项回 `OPTION_NOT_FOUND`；目标不是受支持的原生/自定义下拉回 `NOT_SELECT`。
 - `upload`：Host 读取失败回 `FILE_READ_FAILED`；总大小超过 8MiB 回 `UPLOAD_TOO_LARGE`；
   目标不是 `input[type=file]` 回 `NOT_FILE_INPUT`；Client 设置文件或触发事件失败回 `UPLOAD_FAILED`。
+- `browser_agent_ensure`（0.7.0）：功能关闭回 `DEDICATED_DISABLED`；找不到浏览器可执行文件回
+  `EXECUTABLE_NOT_FOUND`；进程启动失败回 `SPAWN_FAILED`；拉起后端口超时未监听回 `PORT_TIMEOUT`。
+- `browser_tab_front`（0.7.0）：轻量内嵌后端回 `NOT_SUPPORTED`；真实后端未连接回
+  `REAL_BACKEND_REQUIRED`；index 越界或 urlMatch 无命中回 `NO_PAGE`；urlMatch 命中多个回 `BAD_ARG`。
 
 ### 5.2 上传数据边界
 

@@ -293,6 +293,47 @@ test('真实 Chrome/Edge：完整操作、locator refs、shadow/iframe 与资源
   assert.equal(afterActiveClose.tabs.length, 1)
   assert.equal(afterActiveClose.activeId, firstTab)
 
+  // tabFront（0.7.0）：list 覆盖实例全部标签（含 launchPersistentContext 自带、
+  // 会话未登记的 about:blank 初始页）；activate 切前台并重绑会话活动页。
+  const singleFront = await call('tabFront', { action: 'list' })
+  assert.ok(singleFront.count >= 1, `实例至少有本会话页，实际 ${singleFront.count}`)
+  assert.ok(singleFront.tabs.every((tab) => tab.index === singleFront.tabs.indexOf(tab)), 'index 必须与列表位置一致')
+  const ownBefore = singleFront.tabs.filter((tab) => tab.url.startsWith(fixtureUrl))
+  assert.equal(ownBefore.length, 1)
+  assert.equal(ownBefore[0].active, true)
+  assert.equal(ownBefore[0].pageId, firstTab)
+  await call('open', { url: `${fixtureUrl}?front=new`, newTab: true, snapshot: false })
+  const dualFront = await call('tabFront', { action: 'list' })
+  assert.equal(dualFront.count, singleFront.count + 1)
+  const frontIndex = dualFront.tabs.findIndex((tab) => tab.url.includes('?front=new'))
+  assert.ok(frontIndex >= 0)
+  // 0.6.0 现有语义：open newTab:true 会把新页绑为会话活动页，list 里它标记 active。
+  assert.equal(dualFront.tabs[frontIndex].active, true)
+  // urlMatch 命中两个 fixture 标签会被拒绝；按 index 激活原会话页：切前台并重绑。
+  await assert.rejects(call('tabFront', { action: 'activate', urlMatch: fixtureUrl }), (error) => hasCode(error, 'BAD_ARG'))
+  const originalIndex = dualFront.tabs.findIndex((tab) => tab.pageId === firstTab)
+  const backToFirst = await call('tabFront', { action: 'activate', index: originalIndex })
+  assert.equal(backToFirst.activated, true)
+  assert.ok(!backToFirst.url.includes('?front=new'))
+  // 重绑生效：knownUrl 与下一次快照都作用于被激活的标签。
+  assert.equal(driver.knownUrl(session), backToFirst.url)
+  const rebound = await takeSnapshot(driver, session, {})
+  assert.equal(rebound.url, backToFirst.url)
+  // 再激活 ?front=new 页，绑定同步切换。
+  const activated = await call('tabFront', { action: 'activate', index: frontIndex })
+  assert.equal(activated.activated, true)
+  assert.ok(activated.url.includes('?front=new'))
+  assert.ok(String(activated.pageId).startsWith('p'))
+  assert.equal(activated.index, frontIndex)
+  assert.equal(driver.knownUrl(session), activated.url)
+  const reboundAgain = await takeSnapshot(driver, session, {})
+  assert.equal(reboundAgain.url, activated.url)
+  // 收尾：关掉 ?front=new 标签，恢复「活动页=firstTab」，不打扰后续断言。
+  await call('tabs', { action: 'close', id: activated.pageId })
+  const restoredFront = await call('tabFront', { action: 'list' })
+  assert.equal(restoredFront.count, singleFront.count)
+  assert.equal(restoredFront.activeId, firstTab)
+
   const disconnected = await driver.disconnectSession(session)
   assert.equal(disconnected.browserClosed, false)
   assert.equal(disconnected.closedPages, 0)

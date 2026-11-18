@@ -76,11 +76,11 @@ const frameA = {
   ],
 }
 
-test('20 个工具都注册且 schema 只用受支持关键字', () => {
+test('22 个工具都注册且 schema 只用受支持关键字', () => {
   const tools = buildBrowserTools(makeDeps([frameA]))
-  assert.equal(tools.length, 20)
+  assert.equal(tools.length, 22)
   const names = tools.map((t) => t.name)
-  for (const required of ['browser_backend', 'browser_open', 'browser_snapshot', 'browser_wait', 'browser_click', 'browser_select', 'browser_upload', 'browser_dialog', 'browser_nav', 'browser_close']) {
+  for (const required of ['browser_agent_ensure', 'browser_backend', 'browser_open', 'browser_snapshot', 'browser_wait', 'browser_click', 'browser_select', 'browser_upload', 'browser_dialog', 'browser_nav', 'browser_close', 'browser_tab_front']) {
     assert.ok(names.includes(required), `缺少 ${required}`)
   }
   const allowed = new Set(['type', 'oneOf', 'properties', 'required', 'additionalProperties', 'items', 'enum', 'const', 'description', 'title', 'default', 'examples'])
@@ -356,5 +356,93 @@ test('browser_backend 默认查询状态，connect 必须显式给 endpoint', as
   const value = await tools.browser_backend.execute({ action: 'connect' }, { agent: { id: 's-backend' } })
   assert.equal(value.ok, false)
   assert.equal(value.error.code, 'BAD_ARGUMENTS')
+  assert.equal(calls.length, 1)
+})
+
+test('browser_agent_ensure 不接参数、透传 ensure 结果并 lossless 渲染', async () => {
+  const ensured = { ok: true, ensured: true, spawned: true, port: 9333, endpoint: 'http://127.0.0.1:9333', pid: 4321 }
+  const calls = []
+  const deps = makeDeps([frameA])
+  deps.ensureDedicatedBrowser = async (config) => {
+    calls.push(config)
+    return ensured
+  }
+  const tools = toolset(deps)
+  const value = await tools.browser_agent_ensure.execute({ port: 1234 }, { agent: { id: 's-ensure-ok' } })
+  assert.deepEqual(value, ensured)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(JSON.parse(JSON.stringify(value)), value)
+  const text = tools.browser_agent_ensure.output.render({}, value).map((part) => part.text).join('')
+  assert.ok(text.includes('spawned'), text)
+  assert.ok(text.includes('http://127.0.0.1:9333'), text)
+
+  // 未注入 ensure 实现时走默认实现：BASE_CONFIG 没有 dedicatedBrowser → disabled。
+  const defaultTools = toolset(makeDeps([frameA]))
+  const disabled = await defaultTools.browser_agent_ensure.execute({}, { agent: { id: 's-ensure-off' } })
+  assert.equal(disabled.ok, false)
+  assert.equal(disabled.error.code, 'DEDICATED_DISABLED')
+  const disabledText = await run(defaultTools.browser_agent_ensure, {}, 's-ensure-off-render')
+  assert.ok(disabledText.includes('DEDICATED_DISABLED'), disabledText)
+})
+
+test('browser_tab_front：内嵌后端 NOT_SUPPORTED，未连接真实后端 REAL_BACKEND_REQUIRED', async () => {
+  const noBackend = toolset(makeDeps([frameA]))
+  const embedded = await noBackend.browser_tab_front.execute({ action: 'list' }, { agent: { id: 's-tabfront-embedded' } })
+  assert.equal(embedded.ok, false)
+  assert.equal(embedded.error.code, 'NOT_SUPPORTED')
+  assert.ok(embedded.error.message.includes('browser_tabs'), embedded.error.message)
+
+  const deps = makeDeps([frameA])
+  deps.backend = {
+    modeOf: () => 'real',
+    status: () => ({ ok: true, backend: 'real', real: { connected: false } }),
+  }
+  const tools = toolset(deps)
+  const disconnected = await tools.browser_tab_front.execute({ action: 'list' }, { agent: { id: 's-tabfront-dead' } })
+  assert.equal(disconnected.ok, false)
+  assert.equal(disconnected.error.code, 'REAL_BACKEND_REQUIRED')
+  assert.ok(disconnected.error.message.includes('connect'), disconnected.error.message)
+})
+
+test('browser_tab_front：real 后端 list/activate 下发 tabFront，activate 必须二选一', async () => {
+  const calls = []
+  const deps = makeDeps([frameA], calls)
+  deps.bridge.sendCommand = async (sessionId, op, args, timeoutMs) => {
+    calls.push({ sessionId, op, args, timeoutMs })
+    if (args.action === 'list') return { clientId: 'playwright', value: { tabs: [{ index: 0, pageId: 'p1', url: 'https://e.com/', title: '例', active: true }], activeId: 'p1', count: 1 } }
+    return { clientId: 'playwright', value: { activated: true, pageId: 'p1', url: 'https://e.com/', title: '例', index: 0 } }
+  }
+  deps.backend = {
+    modeOf: () => 'real',
+    status: () => ({ ok: true, backend: 'real', real: { connected: true } }),
+  }
+  const tools = toolset(deps)
+  const listed = await tools.browser_tab_front.execute({}, { agent: { id: 's-tabfront-list' } })
+  assert.equal(listed.ok, true)
+  assert.equal(calls[0].op, 'tabFront')
+  assert.deepEqual(calls[0].args, { action: 'list' })
+  assert.equal(listed.count, 1)
+  assert.deepEqual(JSON.parse(JSON.stringify(listed)), listed)
+  const listText = await run(tools.browser_tab_front, {}, 's-tabfront-list-render')
+  assert.ok(listText.includes('tabFront list (1'), listText)
+  assert.ok(listText.includes('[active]'), listText)
+
+  calls.length = 0
+  const activated = await tools.browser_tab_front.execute({ action: 'activate', index: 0 }, { agent: { id: 's-tabfront-idx' } })
+  assert.equal(activated.ok, true)
+  assert.deepEqual(calls[0].args, { action: 'activate', index: 0 })
+  assert.deepEqual(JSON.parse(JSON.stringify(activated)), activated)
+  const activatedText = await run(tools.browser_tab_front, { action: 'activate', index: 0 }, 's-tabfront-idx-render')
+  assert.ok(activatedText.includes('session rebound to p1'), activatedText)
+
+  calls.length = 0
+  await tools.browser_tab_front.execute({ action: 'activate', urlMatch: 'example.com' }, { agent: { id: 's-tabfront-match' } })
+  assert.deepEqual(calls[0].args, { action: 'activate', urlMatch: 'example.com' })
+
+  for (const bad of [{ action: 'activate' }, { action: 'activate', index: 0, urlMatch: 'x' }]) {
+    const value = await tools.browser_tab_front.execute(bad, { agent: { id: 's-tabfront-bad' } })
+    assert.equal(value.ok, false)
+    assert.equal(value.error.code, 'BAD_ARGUMENTS')
+  }
   assert.equal(calls.length, 1)
 })

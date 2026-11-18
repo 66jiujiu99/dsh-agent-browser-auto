@@ -110,6 +110,27 @@ test('CDP：仅控制新页或精确共享页，断开与 dispose 保留外部�
   assert.equal(tabs.value.tabs.length, 1)
   assert.equal(tabs.value.tabs[0].url, sharedUrl)
 
+  // tabFront（0.7.0）：CDP 模式下列出实例全部标签（含外部页），activate 重绑会话活动页。
+  const frontList = await driver.sendCommand('cdp-shared', 'tabFront', { action: 'list' })
+  assert.equal(frontList.value.count, originalPages + 1)
+  const sharedIndex = frontList.value.tabs.findIndex((tab) => tab.url === sharedUrl)
+  assert.ok(sharedIndex >= 0)
+  assert.equal(frontList.value.tabs[sharedIndex].active, true)
+  const otherIndex = frontList.value.tabs.findIndex((tab) => tab.url === otherUrl)
+  assert.ok(otherIndex >= 0)
+  assert.equal(frontList.value.tabs[otherIndex].active, false)
+  const activatedOther = await driver.sendCommand('cdp-shared', 'tabFront', { action: 'activate', index: otherIndex })
+  assert.equal(activatedOther.value.activated, true)
+  assert.equal(activatedOther.value.url, otherUrl)
+  // 重绑生效：会话快照现在打在被激活的外部页上。
+  const reboundSnapshot = await driver.sendCommand('cdp-shared', 'snapshot', { scope: 'document' })
+  assert.equal(reboundSnapshot.value.snapshot.url, otherUrl)
+  // urlMatch 回绑 shared 页。
+  const backToShared = await driver.sendCommand('cdp-shared', 'tabFront', { action: 'activate', urlMatch: '/shared' })
+  assert.equal(backToShared.value.url, sharedUrl)
+  const afterBack = await driver.sendCommand('cdp-shared', 'snapshot', { scope: 'document' })
+  assert.equal(afterBack.value.snapshot.url, sharedUrl)
+
   await driver.dispose()
   assert.equal(shared.isClosed(), false)
   assert.equal(other.isClosed(), false)

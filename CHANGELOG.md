@@ -2,6 +2,28 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 0.7.0 — 2026-11-18
+
+### 新增
+
+- **专用浏览器实例保障 `browser_agent_ensure`**：TCP 探测 `127.0.0.1:<dedicatedBrowser.port>`（默认 9333），
+  已监听直接成功；未监听按配置拉起浏览器（参数数组 + `shell:false`，Windows `detached:true`+`unref`，
+  探测顺序 `executablePath` → 注册表/常见路径 msedge → chrome）并轮询端口（200ms 间隔，默认 15000ms）。
+  工具无参数：端口/profile 只认配置，防提示注入；不做 CDP 连接，连接仍由 `browser_backend connect` 完成。
+  工具总数由 20 增至 22。
+- **真实实例标签管理 `browser_tab_front`**：`list` 列出已连接实例全部标签（含非本会话登记页）；
+  `activate`（`index`/`urlMatch` 二选一）`bringToFront` 并**重绑会话活动页**——修复「切前台后快照
+  仍打在旧页」的绑定问题。轻量内嵌回 `NOT_SUPPORTED`，真实后端未连接回 `REAL_BACKEND_REQUIRED`。
+- **systemPrompt 约定注入**：`dedicatedBrowser.enabled:true` 时向 agent 注入「先 ensure 再 connect、
+  不代输凭证、与日常浏览器隔离」的简短约定；文案在 `locale/zh.json` / `locale/en.json`
+  （`{endpoint}`/`{port}` 占位符按配置替换），`systemPrompt` 作为可选服务，缺失时不注入。
+- 配置新增 `dedicatedBrowser` 段：`enabled/port/userDataDir/browser/executablePath/spawnTimeoutMs`。
+
+### 验证与已知限制
+
+- 全量自动化结果见 README「验收状态 0.7.0」；专用实例真机拉起（真实 Edge）待安装后验证。
+- `browser_agent_ensure` 只保障「进程活着」；CDP 连接、页面共享边界仍由 `browser_backend` 沿用 0.6.0 语义。
+
 ## 0.6.0 — 2026-11-03
 
 ### 新增

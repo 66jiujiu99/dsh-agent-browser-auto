@@ -29,3 +29,14 @@
           browser: auto       # auto / chrome / edge；不会下载 Chromium
           profileDir: ""      # 空 = ~/.dsh/storages/agent-browser-auto/real-browser-profiles
           startupTimeoutMs: 30000
+        # 专用浏览器实例（0.7.0）：browser_agent_ensure 探测 127.0.0.1:<port>，
+        # 未监听才按这里的 profile/端口拉起（detached，不挂在 Host 进程树下）；
+        # 只保障「进程活着」，CDP 连接仍由 browser_backend connect 完成。
+        # port / userDataDir 只认这里的配置，工具参数不能覆盖（防提示注入）。
+        dedicatedBrowser:
+          enabled: true
+          port: 9333
+          userDataDir: "C:\\Data\\browser-agent"
+          browser: edge         # edge / chrome；探测顺序 executablePath → msedge → chrome
+          executablePath: ""    # 空 = 注册表 App Paths / 常见安装路径自动探测
+          spawnTimeoutMs: 15000 # 拉起后端口轮询总期限（1000–120000ms）
