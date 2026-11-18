@@ -135,15 +135,18 @@ export function apply(ctx, rawConfig) {
   ctx.effect(() => () => realDriver.dispose(), 'agent-browser-auto: Playwright 后端')
   ctx.effect(() => () => backend.dispose(), 'agent-browser-auto: 后端路由')
   if (extensionBridge !== undefined) {
-    ctx.effect(() => extensionBridge.dispose(), 'agent-browser-auto: 扩展桥接 WS 服务')
+    // 0.8.0 真机悬案根因（2026-11-18 修复）：ctx.effect(fn) 的 fn 在【注册时】执行、返回值才是
+    // 卸载器。此前误写成 `ctx.effect(() => extensionBridge.dispose(), …)`——注册即 dispose，
+    // 随后 start() 撞上 disposed 直接静默返回，表现为「enabled=true 却永不监听且无任何日志」。
+    // 必须与上面三行同款：外层箭头返回内层卸载器。
+    ctx.effect(() => () => extensionBridge.dispose(), 'agent-browser-auto: 扩展桥接 WS 服务')
     audit.debug('extension-bridge-mount', {
       enabled: config.extensionBridge.enabled,
       port: config.extensionBridge.port,
       pairTimeoutMs: config.extensionBridge.pairTimeoutMs,
     })
-    // 监听是异步的：端口被占时会退避重试并如实写日志/状态，绝不拖垮插件加载。
-    // start() 内部已有退避与 portError；这里只兜底捕获意外异常并落审计——静默吞掉会导致
-    // 「enabled=true 却永远不监听」且无任何排查线索（2026-11-18 实测发生过一次）。
+    // 监听是异步的：start() 内部已保证任何失败路径都落 portError + 日志（含 disposed /
+    // 意外异常 / 监听回调丢失看门狗）；这里的 catch 只是最后防线，避免 void 静默 rejection。
     extensionBridge.start().catch((error) => {
       const message = error instanceof Error ? error.message : String(error)
       audit.debug('extension-start-failed', { message })

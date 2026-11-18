@@ -421,3 +421,127 @@ test('截图结果：pngBase64 落盘 auditDir/shots 并从结果摘除', async 
     await suite.cleanup()
   }
 })
+
+test('Host 真实 deps 形状：完整 ResolvedConfig + 真实 createAudit，start 必须真的监听', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ext-bridge-hostdeps-'))
+  // 完整 ResolvedConfig（所有键都有值，模拟 Host 传入的实际形状，含 Windows 反斜杠路径）。
+  const config = resolveConfig({
+    allowedHosts: [],
+    blockedHosts: [],
+    enableEval: false,
+    commandTimeoutMs: 45000,
+    pollWaitMs: 20000,
+    maxResultBytes: 12000,
+    auditDir: dir,
+    debug: true,
+    deepMode: { enabled: false, portFile: join(dir, 'DevToolsActivePort'), endpoint: '', maxNodes: 200, timeoutMs: 8000 },
+    realBrowser: { browser: 'edge', profileDir: join(dir, 'profiles'), startupTimeoutMs: 30000 },
+    dedicatedBrowser: { enabled: true, port: 9333, userDataDir: join(dir, 'profile'), browser: 'edge', executablePath: '', spawnTimeoutMs: 15000 },
+    extensionBridge: { enabled: true, port: 0, pairTimeoutMs: 300000 },
+  })
+  const audit = createAudit({ config, log: () => {} })
+  const bridge = createExtensionBridge({ config, audit, log: () => {} })
+  const net = await import('node:net')
+  try {
+    const started = await bridge.start()
+    assert.equal(started.ok, true, `start 应成功：${started.error}`)
+    assert.equal(started.listening, true)
+    assert.equal(bridge.status().listening, true)
+    // 端口真的有监听者：TCP 探活必须成功。
+    const reachable = await new Promise((resolve) => {
+      const socket = new net.Socket()
+      socket.once('connect', () => { socket.destroy(); resolve(true) })
+      socket.once('error', () => resolve(false))
+      socket.setTimeout(2000, () => { socket.destroy(); resolve(false) })
+      socket.connect(started.port, '127.0.0.1')
+    })
+    assert.equal(reachable, true, `端口 ${started.port} 应可连通`)
+  } finally {
+    await bridge.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('Cordis effect 误用回归：dispose 先于 start 时绝不静默（2026-11-18 Host 悬案复刻）', async () => {
+  const logs = []
+  const suite = await makeSuite({ io: { ...noDelayIo } })
+  // 用注入的 log 出口重建 bridge，捕获 warn 落日志。
+  const config = suite.config
+  const bridge = createExtensionBridge({
+    config,
+    audit: suite.audit,
+    log: (level, message) => logs.push(`[${level}] ${message}`),
+    io: { ...noDelayIo },
+  })
+  try {
+    // 复刻旧 bug 的调用形状：ctx.effect(fn) 注册时立即执行 fn —— dispose 在 start 前被调用。
+    const registerEffect = (fn) => fn()
+    registerEffect(() => bridge.dispose())
+    const started = await bridge.start()
+    assert.equal(started.ok, false)
+    assert.equal(started.listening, false)
+    assert.match(started.error, /disposed/, 'error 必须写明 disposed-before-start')
+    assert.equal(bridge.status().listening, false)
+    assert.notEqual(bridge.status().portError, '', 'portError 必须回写')
+    // 绝不静默：warn 日志必须存在。
+    assert.ok(logs.some((line) => line.includes('dispose') && line.includes('start')), logs.join('\n'))
+    // 并发守卫：dispose 后重复 start 也稳定返回同一结论，不悬挂。
+    const again = await bridge.start()
+    assert.equal(again.ok, false)
+    assert.match(again.error, /disposed/)
+  } finally {
+    await rm(suite.dir, { recursive: true, force: true })
+  }
+})
+
+test('start 并发/重复调用串行化：只做一次真正的监听尝试', async () => {
+  const suite = await makeSuite({ io: { ...noDelayIo } })
+  try {
+    // 在第一次 start 完成前再发起两次（模拟 Host 重载/重复 mount 场景）。
+    const [a, b, c] = await Promise.all([suite.bridge.start(), suite.bridge.start(), suite.bridge.start()])
+    assert.equal(a.ok, true)
+    assert.equal(b.ok, true)
+    assert.equal(c.ok, true)
+    assert.equal(a.port, b.port)
+    assert.equal(b.port, c.port)
+    assert.equal(suite.bridge.status().listening, true)
+    assert.equal(suite.bridge.sessionCount(), 0)
+    // 完成后再调 start 走 listening 早退分支，同样成功。
+    const again = await suite.bridge.start()
+    assert.equal(again.ok, true)
+    assert.equal(again.port, a.port)
+  } finally {
+    await suite.cleanup()
+  }
+})
+
+test('看门狗：listen 回调与 error 事件都丢失时收敛为显式失败，不悬挂', async () => {
+  const logs = []
+  const dir = await mkdtemp(join(tmpdir(), 'ext-bridge-watchdog-'))
+  const config = resolveConfig({ auditDir: dir, debug: false, extensionBridge: { enabled: true, port: 0 } })
+  const audit = createAudit({ config, log: () => {} })
+  /** 从不回调的假 http server（模拟宿主 net 栈异常：listen 既不成功也不报错）。 */
+  const fakeServer = () => ({
+    on() { return this },
+    listen() { /* 永不回调 */ },
+    close(cb) { if (typeof cb === 'function') cb() },
+    closeAllConnections() {},
+  })
+  const bridge = createExtensionBridge({
+    config,
+    audit,
+    log: (level, message) => logs.push(`[${level}] ${message}`),
+    io: { delay: async () => {}, httpImpl: { createServer: () => fakeServer() }, listenWatchdogMs: 60 },
+  })
+  try {
+    const started = await bridge.start()
+    assert.equal(started.ok, false)
+    assert.equal(started.listening, false)
+    assert.match(started.error, /监听回调丢失/, `error 应写明看门狗结论：${started.error}`)
+    assert.notEqual(bridge.status().portError, '')
+    assert.ok(logs.some((line) => line.includes('监听失败')), '最终失败必须落 warn 日志')
+  } finally {
+    await bridge.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
